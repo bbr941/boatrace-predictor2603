@@ -1,0 +1,11 @@
+streamlit
+pandas
+numpy
+lightgbm
+catboost
+matplotlib
+seaborn
+beautifulsoup4
+aiohttp
+lxml
+scikit-learn

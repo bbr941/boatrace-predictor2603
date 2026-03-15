@@ -1,0 +1,35 @@
+# Large data files
+*.db
+*.sqlite
+*.csv
+*.xlsx
+
+# Models and binaries (if you want to keep repo small - but we'll include the 1MB models)
+# models/large_model.bin
+# !models/cb_model.bin # Example: include specific small models if needed
+
+# Python environment
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Agent/Ide files
+.gemini/
+.agent/
+.vscode/
+.idea/
+
+# Local logs
+*.log
+catboost_info/

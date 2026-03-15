@@ -1,0 +1,11 @@
+lightgbm
+catboost
+tabpfn==0.1.9
+optuna
+pandas
+numpy
+matplotlib
+seaborn
+scikit-learn
+sqlalchemy
+tqdm
