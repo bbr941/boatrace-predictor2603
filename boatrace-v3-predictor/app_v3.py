@@ -44,6 +44,8 @@ def load_models():
             models['alt_scaler'] = pickle.load(f)
         with open(os.path.join(MODEL_DIR, 'meta_model.pkl'), 'rb') as f:
             models['meta'] = pickle.load(f)
+        with open(os.path.join(MODEL_DIR, 'racer_mapping.pkl'), 'rb') as f:
+            models['racer_mapping'] = pickle.load(f)
         return models
     except Exception as e:
         st.error(f"Error loading models: {e}")
@@ -116,6 +118,17 @@ def apply_betting_strategies(trifecta_probs, odds_dict, budget, ev_threshold, ke
     
     return df.sort_values('EV', ascending=False)
 
+def softmax_calibration(scores, group_sizes):
+    probs = np.zeros_like(scores)
+    idx = 0
+    for size in group_sizes:
+        if size == 0: continue
+        s = scores[idx:idx+size]
+        e_x = np.exp(s - np.max(s))
+        probs[idx:idx+size] = e_x / e_x.sum()
+        idx += size
+    return probs
+
 def run_simulation_backtest(models):
     """検証データを用いたバックテスト・シミュレーション（固定シード）"""
     st.subheader("📈 Strategy Backtest (Fixed Seed Simulation)")
@@ -179,7 +192,7 @@ def main():
             st.error("Failed to fetch data. The race might not have happened or network is down.")
             return
 
-        # Feature Engineering for Inference
+        # Feature Engineering for Inference (V3.1+ Advanced)
         race_info = scraped_data['race_info']
         odds_info = scraped_data['odds_info']
         entries = race_info['entries']
@@ -188,6 +201,12 @@ def main():
         features_list = []
         for i in range(1, 7):
             entry_row = entries[entries['boat_number'] == i].iloc[0]
+            racer_id = str(entry_row.get('racer_id', '0'))
+            
+            # Target Encoding Lookup
+            racer_mapping = models.get('racer_mapping', {})
+            racer_enc = racer_mapping.get(racer_id, racer_mapping.get('global_mean', 0.2))
+            
             features_list.append({
                 'venue_code': place_code,
                 'exhibition_time': before['exhibition_times'].get(i, 0.0),
@@ -196,10 +215,28 @@ def main():
                 'nat_win_rate': entry_row.get('nat_win_rate', 0.0),
                 'motor_rate': entry_row.get('motor_quinella_rate', 0.0),
                 'boat_rate': entry_row.get('boat_quinella_rate', 0.0),
-                'racer_id': str(entry_row.get('racer_id', '0'))
+                'racer_id': racer_id,
+                'racer_target_enc': racer_enc
             })
         
         X = pd.DataFrame(features_list)
+        
+        # Phase 1: Relative Features (z-score, diff)
+        def zscore(x):
+            s = x.std()
+            return (x - x.mean()) / s if s > 0 else 0
+        
+        X['exhibition_time_z'] = zscore(X['exhibition_time'])
+        X['nat_win_rate_z'] = zscore(X['nat_win_rate'])
+        
+        b1_rate = X[X.index == 0]['nat_win_rate'].values[0] # boat_number 1 is index 0
+        X['win_rate_diff_b1'] = X['nat_win_rate'] - b1_rate
+        
+        # Ensure correct order and categorical types
+        target_features = ['venue_code', 'exhibition_time', 'exhibition_start_timing', 'pred_course', 
+                        'nat_win_rate', 'motor_rate', 'boat_rate', 'racer_id',
+                        'exhibition_time_z', 'nat_win_rate_z', 'win_rate_diff_b1', 'racer_target_enc']
+        X = X[target_features]
         X['venue_code'] = X['venue_code'].astype('category')
         X['racer_id'] = X['racer_id'].astype('category')
 
@@ -207,7 +244,7 @@ def main():
             with st.expander("🛠 Raw Data Debug View"):
                 st.write(f"**Fetched At:** {datetime.datetime.now()}")
                 st.write(f"**Target URL:** https://www.boatrace.jp/owpc/pc/race/racelist?jcd={place_code}&rno={race_no}&hd={date_str}")
-                st.write("**Inference Features (X):**")
+                st.write("**Inference Features (V3.1+ Advanced):**")
                 st.dataframe(X)
                 st.write("**Raw Before Info:**")
                 st.json(before)
@@ -215,10 +252,14 @@ def main():
                 st.write(list(odds_info.items())[:10])
 
         # Base Model Predictions
-        lgb_probs = models['lgb'].predict(X)
+        lgb_scores = models['lgb'].predict(X)
+        lgb_probs = softmax_calibration(lgb_scores, [6]) # Calibrate LambdaRank score
         cb_probs = models['cb'].predict_proba(X)[:, 1]
         
-        X_alt_sub = X.drop(['venue_code', 'racer_id'], axis=1)
+        # Alt Model (Use only numerical features)
+        num_features_l2 = ['exhibition_time', 'exhibition_start_timing', 'pred_course', 
+                           'nat_win_rate', 'motor_rate', 'boat_rate', 'racer_target_enc']
+        X_alt_sub = X[num_features_l2]
         X_alt_scaled = models['alt_scaler'].transform(X_alt_sub)
         alt_probs = models['alt'].predict_proba(X_alt_scaled)[:, 1]
         
