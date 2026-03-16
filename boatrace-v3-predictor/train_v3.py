@@ -27,7 +27,13 @@ torch.load = patched_torch_load
 # -----------------------------------------------
 
 # --- Configuration ---
-ENABLE_L2_FEATURE_SELECTION = False # Experiment Flag: V3.1+ logic
+ENABLE_L2_FEATURE_SELECTION = False # V3.1 logic flag
+
+# --- V4 Experiment Flags ---
+ENABLE_EMA_MOMENTUM = False      # Phase 4 (Rollback)
+ENABLE_TIME_DECAY_WEIGHT = True  # Phase 5 (Adopted)
+ENABLE_FM_MODEL = False          # Phase 6 (Rollback)
+# ---------------------------
 DB_PATH = r'D:\BOAT2504_Base_line\BOAT2504_DB\boatrace.db'
 MODEL_DIR = 'models'
 os.makedirs(MODEL_DIR, exist_ok=True)
@@ -53,7 +59,7 @@ def load_data(limit=20000):
     # 既存の make_data_set.py のクエリをベースにする
     query = f"""
     SELECT
-        re.race_id, re.boat_number, re.racer_id, r.venue_code,
+        re.race_id, re.boat_number, re.racer_id, r.venue_code, r.race_date,
         bi.exhibition_time, bi.exhibition_start_timing, 
         COALESCE(bi.exhibition_entry_course, re.boat_number) as pred_course,
         re.nat_win_rate, re.motor_rate, re.boat_rate, re.prior_results,
@@ -86,6 +92,27 @@ def load_data(limit=20000):
     df['win_rate_diff_b1'] = df['nat_win_rate'] - df['b1_nat_win_rate'].fillna(df['nat_win_rate'])
     df.drop('b1_nat_win_rate', axis=1, inplace=True)
     
+    # --- Feature Engineering: Phase 4 EMA Momentum ---
+    if ENABLE_EMA_MOMENTUM:
+        print("Adding Phase 4: EMA Momentum features (with shift(1))...")
+        # Ensure time-series order for EACH racer
+        # We use race_id as a proxy for time if date is not in the select (but ordering is by date in query)
+        # Actually, let's sort by race_id globally first
+        df_sorted = df.sort_values(['racer_id', 'race_id']).copy()
+        
+        # Calculate EMA for 'rank' and 'exhibition_time'
+        # span=5 for recent trend
+        # VERY IMPORTANT: shift(1) to avoid leakage (current race outcome must not be in features)
+        df_sorted['ema_rank_5'] = df_sorted.groupby('racer_id')['rank'].transform(lambda x: x.ewm(span=5, adjust=False).mean().shift(1))
+        df_sorted['ema_ex_time_5'] = df_sorted.groupby('racer_id')['exhibition_time'].transform(lambda x: x.ewm(span=5, adjust=False).mean().shift(1))
+        
+        # Merge back to original df
+        df = df.merge(df_sorted[['race_id', 'boat_number', 'ema_rank_5', 'ema_ex_time_5']], 
+                      on=['race_id', 'boat_number'], how='left')
+        # Fill first races with 0 or neutral (rank 3.5 is average)
+        df['ema_rank_5'] = df['ema_rank_5'].fillna(3.5)
+        df['ema_ex_time_5'] = df['ema_ex_time_5'].fillna(df['exhibition_time'])
+    
     # --- Standard Preprocessing ---
     # rank 1st -> 5, 2nd -> 4, ..., 6th -> 0 (for lambdarank relevance)
     df['rank_target'] = (6 - df['rank']).astype(int)
@@ -111,6 +138,9 @@ def load_data(limit=20000):
     
     num_cols = ['exhibition_time', 'exhibition_start_timing', 'nat_win_rate', 'motor_rate', 'boat_rate', 
                 'exhibition_time_z', 'nat_win_rate_z', 'win_rate_diff_b1', 'racer_target_enc']
+    if ENABLE_EMA_MOMENTUM:
+        num_cols.extend(['ema_rank_5', 'ema_ex_time_5'])
+
     for col in num_cols:
         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
@@ -135,7 +165,7 @@ def softmax_calibration(scores, group_sizes):
         idx += size
     return probs
 
-def train_lgb(X_train, y_train, X_val, y_val, train_groups, val_groups, cat_features):
+def train_lgb(X_train, y_train, X_val, y_val, train_groups, val_groups, cat_features, train_weights=None):
     print("\n--- Training LightGBM LambdaRank (CPU Mode) ---")
     def objective(trial):
         param = {
@@ -147,7 +177,7 @@ def train_lgb(X_train, y_train, X_val, y_val, train_groups, val_groups, cat_feat
             'feature_fraction': trial.suggest_float('feature_fraction', 0.7, 1.0),
             **LGB_PARAMS_BASE
         }
-        train_ds = lgb.Dataset(X_train, label=y_train, group=train_groups, categorical_feature=cat_features)
+        train_ds = lgb.Dataset(X_train, label=y_train, group=train_groups, weight=train_weights, categorical_feature=cat_features)
         val_ds = lgb.Dataset(X_val, label=y_val, group=val_groups, reference=train_ds, categorical_feature=cat_features)
         gbm = lgb.train(param, train_ds, valid_sets=[val_ds], 
                         callbacks=[lgb.early_stopping(stopping_rounds=30), lgb.log_evaluation(period=0)])
@@ -160,12 +190,12 @@ def train_lgb(X_train, y_train, X_val, y_val, train_groups, val_groups, cat_feat
     best_params.update(LGB_PARAMS_BASE)
     best_params['objective'] = 'lambdarank'
     
-    train_ds = lgb.Dataset(X_train, label=y_train, group=train_groups, categorical_feature=cat_features)
+    train_ds = lgb.Dataset(X_train, label=y_train, group=train_groups, weight=train_weights, categorical_feature=cat_features)
     val_ds = lgb.Dataset(X_val, label=y_val, group=val_groups, reference=train_ds, categorical_feature=cat_features)
     model = lgb.train(best_params, train_ds, valid_sets=[val_ds], callbacks=[lgb.early_stopping(stopping_rounds=50)])
     return model
 
-def train_catboost(X_train, y_train, X_val, y_val, cat_features):
+def train_catboost(X_train, y_train, X_val, y_val, cat_features, train_weights=None):
     print("\n--- Training CatBoost (CPU Mode) ---")
     model = cb.CatBoostClassifier(
         iterations=500,
@@ -174,10 +204,10 @@ def train_catboost(X_train, y_train, X_val, y_val, cat_features):
         early_stopping_rounds=50,
         **CB_PARAMS_BASE
     )
-    model.fit(X_train, y_train, eval_set=(X_val, y_val), cat_features=cat_features)
+    model.fit(X_train, y_train, eval_set=(X_val, y_val), cat_features=cat_features, sample_weight=train_weights)
     return model
 
-def train_alt_model(X_train, y_train, X_val, y_val):
+def train_alt_model(X_train, y_train, X_val, y_val, train_weights=None):
     """TabPFN の外部依存問題を回避するための代替基底モデル (Strong Regularized LR)"""
     print(f"\n--- Training Alternative Model (L2-Regularized LR) [Feature Selection: {ENABLE_L2_FEATURE_SELECTION}] ---")
     from sklearn.preprocessing import StandardScaler
@@ -206,9 +236,96 @@ def train_alt_model(X_train, y_train, X_val, y_val):
     
     # 強力な正則化を施した LR
     model = LogisticRegression(C=0.1, max_iter=1000)
-    model.fit(X_train_scaled, y_train)
+    model.fit(X_train_scaled, y_train, sample_weight=train_weights)
     
     return model, X_val_scaled, scaler
+
+# --- Phase 6: Factorization Machines (FM) Implementation ---
+class SimpleFM(torch.nn.Module):
+    def __init__(self, n_features, n_factors):
+        super(SimpleFM, self).__init__()
+        self.w0 = torch.nn.Parameter(torch.zeros(1))
+        self.w = torch.nn.Embedding(n_features, 1)
+        self.v = torch.nn.Embedding(n_features, n_factors)
+        
+        torch.nn.init.xavier_uniform_(self.v.weight)
+        torch.nn.init.zeros_(self.w.weight)
+        
+    def forward(self, x):
+        # x: [batch_size, n_input_features] indices
+        linear_part = self.w0 + self.w(x).sum(dim=1).squeeze(1)
+        
+        # Interaction part: 0.5 * sum((sum(v_i * x_i)^2) - sum((v_i * x_i)^2))
+        # Since x_i are indicators (all 1), it simplifies to:
+        emb = self.v(x) # [batch_size, n_input_features, n_factors]
+        sum_square = torch.pow(emb.sum(dim=1), 2)
+        square_sum = torch.pow(emb, 2).sum(dim=1)
+        interaction_part = 0.5 * (sum_square - square_sum).sum(dim=1)
+        
+        return torch.sigmoid(linear_part + interaction_part)
+
+def train_fm(df_train, df_val, target_col='target'):
+    print("\n--- Training Factorization Machine (PyTorch) ---")
+    global ENABLE_FM_MODEL # Allow disabling on failure
+    
+    try:
+        from sklearn.preprocessing import LabelEncoder
+        fm_features = ['venue_code', 'racer_id', 'boat_number']
+        
+        # Prepare indices
+        X_train_fm = pd.DataFrame()
+        X_val_fm = pd.DataFrame()
+        
+        # Label Encoding across both sets to ensure same mapping
+        combined = pd.concat([df_train[fm_features], df_val[fm_features]], axis=0)
+        offset = 0
+        total_dims = 0
+        for col in fm_features:
+            le = LabelEncoder()
+            # Convert to str to handle potential mix of types
+            combined_vals = le.fit_transform(combined[col].astype(str))
+            X_train_fm[col] = combined_vals[:len(df_train)] + offset
+            X_val_fm[col] = combined_vals[len(df_train):] + offset
+            offset += len(le.classes_)
+            total_dims += len(le.classes_)
+            
+        train_tensor = torch.tensor(X_train_fm.values, dtype=torch.long)
+        val_tensor = torch.tensor(X_val_fm.values, dtype=torch.long)
+        y_train_tensor = torch.tensor(df_train[target_col].values, dtype=torch.float32)
+        y_val_tensor = torch.tensor(df_val[target_col].values, dtype=torch.float32)
+        
+        model = SimpleFM(total_dims, n_factors=8)
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+        criterion = torch.nn.BCELoss()
+        
+        # Training loop
+        for epoch in range(20):
+            model.train()
+            optimizer.zero_grad()
+            outputs = model(train_tensor)
+            loss = criterion(outputs, y_train_tensor)
+            
+            if torch.isnan(loss):
+                raise ValueError("NaN detected in FM loss")
+                
+            loss.backward()
+            optimizer.step()
+            
+            if epoch % 10 == 0:
+                print(f"  Epoch {epoch}, Loss: {loss.item():.4f}")
+                
+        model.eval()
+        with torch.no_grad():
+            val_outputs = model(val_tensor)
+            fm_val_preds = val_outputs.numpy()
+            
+        print(f"  FM LogLoss: {log_loss(y_val_tensor, fm_val_preds):.4f}")
+        return model, fm_val_preds, le # (Simplified le return for brevity)
+        
+    except Exception as e:
+        print(f"  [CRITICAL] FM Training failed: {e}. Falling back to ENABLE_FM_MODEL = False.")
+        ENABLE_FM_MODEL = False
+        return None, None, None
 
 def main():
     df, racer_mapping = load_data(30000)
@@ -216,6 +333,11 @@ def main():
     features = ['venue_code', 'exhibition_time', 'exhibition_start_timing', 'pred_course', 
                 'nat_win_rate', 'motor_rate', 'boat_rate', 'racer_id',
                 'exhibition_time_z', 'nat_win_rate_z', 'win_rate_diff_b1', 'racer_target_enc']
+    
+    if ENABLE_EMA_MOMENTUM:
+        features.extend(['ema_rank_5', 'ema_ex_time_5'])
+        print(f"  V4 Phase 4 Enabled: Added {['ema_rank_5', 'ema_ex_time_5']}")
+
     cat_features = ['venue_code', 'racer_id']
     target = 'target'
     rank_target = 'rank_target'
@@ -237,33 +359,56 @@ def main():
     y_val = val_df[target]
     y_val_rank = val_df[rank_target]
     
+    # --- Phase 5: Time Decay Weights ---
+    train_weights = None
+    if ENABLE_TIME_DECAY_WEIGHT:
+        print("\nAdding Phase 5: Time Decay Weights...")
+        # Convert race_date to days from most recent
+        train_df['race_date_dt'] = pd.to_datetime(train_df['race_date'])
+        latest_date = train_df['race_date_dt'].max()
+        train_df['days_diff'] = (latest_date - train_df['race_date_dt']).dt.days
+        # Exponential decay: w = exp(-alpha * days)
+        alpha = 0.001 # Conservative decay
+        train_weights = np.exp(-alpha * train_df['days_diff'])
+        print(f"  Sample Weights: Min={train_weights.min():.4f}, Max={train_weights.max():.4f}, Mean={train_weights.mean():.4f}")
+
     # 1. LightGBM (LambdaRank)
-    model_lgb = train_lgb(X_train, y_train_rank, X_val, y_val_rank, train_groups, val_groups, cat_features)
+    model_lgb = train_lgb(X_train, y_train_rank, X_val, y_val_rank, train_groups, val_groups, cat_features, train_weights=train_weights)
     lgb_val_scores = model_lgb.predict(X_val)
     # Calibrate: Ranking scores to pseudo-probabilities via Softmax per race
     lgb_val_preds = softmax_calibration(lgb_val_scores, val_groups)
     print(f"LGB (LambdaRank calibrated) LogLoss: {log_loss(y_val, lgb_val_preds):.4f}")
     
     # 2. CatBoost (Binary classification)
-    model_cb = train_catboost(X_train, y_train, X_val, y_val, cat_features)
+    model_cb = train_catboost(X_train, y_train, X_val, y_val, cat_features, train_weights=train_weights)
     cb_val_preds = model_cb.predict_proba(X_val)[:, 1]
     print(f"CB LogLoss: {log_loss(y_val, cb_val_preds):.4f}")
     
     # 3. Alternative Model
-    model_alt, X_val_alt, alt_scaler = train_alt_model(X_train, y_train, X_val, y_val)
+    model_alt, X_val_alt, alt_scaler = train_alt_model(X_train, y_train, X_val, y_val, train_weights=train_weights)
     alt_val_preds = model_alt.predict_proba(X_val_alt)[:, 1]
     print(f"Alt-Model LogLoss: {log_loss(y_val, alt_val_preds):.4f}")
 
+    # 4. Factorization Machines (FM)
+    fm_val_preds = None
+    if ENABLE_FM_MODEL:
+        model_fm, fm_val_preds, fm_le = train_fm(train_df, val_df)
+        if not ENABLE_FM_MODEL: # Failed during training
+            fm_val_preds = None
+
     # --- Stacking ---
-    print("\n--- Meta-Stacking (V3.1: LGBM(Rank)+CB+AltModel) ---")
-    X_meta = np.vstack([lgb_val_preds, cb_val_preds, alt_val_preds]).T
+    print(f"\n--- Meta-Stacking (V4: ENABLE_FM={ENABLE_FM_MODEL}) ---")
+    if ENABLE_FM_MODEL and fm_val_preds is not None:
+        X_meta = np.vstack([lgb_val_preds, cb_val_preds, alt_val_preds, fm_val_preds]).T
+    else:
+        X_meta = np.vstack([lgb_val_preds, cb_val_preds, alt_val_preds]).T
     
     meta_model = LogisticRegression()
     meta_model.fit(X_meta, y_val)
     
     final_preds = meta_model.predict_proba(X_meta)[:, 1]
-    print(f"Stacked Model (V3.1) LogLoss: {log_loss(y_val, final_preds):.4f}")
-    print(f"Stacked Model (V3.1) Accuracy: {accuracy_score(y_val, (final_preds > 0.5).astype(int)):.4f}")
+    print(f"Stacked Model (V4) LogLoss: {log_loss(y_val, final_preds):.4f}")
+    print(f"Stacked Model (V4) Accuracy: {accuracy_score(y_val, (final_preds > 0.5).astype(int)):.4f}")
     
     # Save Models
     with open(os.path.join(MODEL_DIR, 'meta_model.pkl'), 'wb') as f:
