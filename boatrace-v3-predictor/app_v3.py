@@ -252,8 +252,13 @@ def get_ai_prediction(scraped_data, models):
     lgb_probs = softmax_calibration(lgb_scores, [6])
     cb_probs = models['cb'].predict_proba(X)[:, 1]
     
-    num_features_l2 = ['exhibition_time', 'exhibition_start_timing', 'pred_course', 
-                       'nat_win_rate', 'motor_rate', 'boat_rate', 'racer_target_enc']
+    # Alt-model (Strong Regularized LR) の数値特徴量 (10次元)
+    # 学習時 (ENABLE_L2_FEATURE_SELECTION=False) の数値カラム抽出順に合わせる
+    num_features_l2 = [
+        'exhibition_time', 'exhibition_start_timing', 'pred_course', 
+        'nat_win_rate', 'motor_rate', 'boat_rate',
+        'exhibition_time_z', 'nat_win_rate_z', 'win_rate_diff_b1', 'racer_target_enc'
+    ]
     X_alt_sub = X[num_features_l2]
     X_alt_scaled = models['alt_scaler'].transform(X_alt_sub)
     alt_probs = models['alt'].predict_proba(X_alt_scaled)[:, 1]
