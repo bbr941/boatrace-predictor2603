@@ -110,8 +110,9 @@ async def get_active_venues(date_str):
     
     from bs4 import BeautifulSoup
     soup = BeautifulSoup(html, 'lxml')
-    # 開催中の場へのリンクを抽出
-    venue_links = soup.select("table.is-w748 td.is-arrow1 a[href*='jcd=']")
+    import re
+    # 開催中の場へのリンクを抽出 (CSS クラスに依存せず、リンク先 URL のパターンで捕捉)
+    venue_links = soup.find_all('a', href=re.compile(r'raceindex.*jcd='))
     active_venues = []
     seen = set()
     for link in venue_links:
@@ -409,8 +410,14 @@ def main():
                     st.warning("No active venues found today.")
                 else:
                     results = []
-                    # 負荷軽減のため、12R(優勝戦など)および現在時刻付近のレース(仮に10R)をターゲット
-                    target_races = ["12", "11", "10"] 
+                    # 日付判定: 過去日付の場合は全12レースを精査、当日の場合は主要レース(10-12)を優先
+                    is_past = date_dt < datetime.date.today()
+                    if is_past:
+                        target_races = [str(i) for i in range(1, 13)]
+                        st.write(f"📊 Historical Mode: Scanning all 12 races for {date_str}...")
+                    else:
+                        target_races = ["12", "11", "10"]
+                        st.write(f"🚀 Real-time Mode: Scanning main races (10R, 11R, 12R) for {date_str}...")
                     
                     for v in venues:
                         status.update(label=f"Scanning {v['name']}...")

@@ -338,7 +338,11 @@ def _parse_beforeinfo(html_content: str) -> dict | None:
 
         main_table_exh_time = soup.select_one("table.is-w748")
         if main_table_exh_time:
+            # 進行中は tbody.is-fs12 だが、終了後は単なる tbody になる場合があるため柔軟に対応
             tbody_elements = main_table_exh_time.select("tbody.is-fs12")
+            if not tbody_elements:
+                tbody_elements = main_table_exh_time.select("tbody")
+            
             if len(tbody_elements) >= 6:
                 for i, tbody in enumerate(tbody_elements[:6], 1):
                     boat_num = i; exh_time_cell = tbody.select_one("tr:first-child td:nth-of-type(5)")
@@ -396,7 +400,8 @@ def _parse_odds(html_content: str, logger: logging.Logger) -> dict | None:
         odds_data = {}
         target_tbody = soup.select_one("tbody.is-p3-0")
         if not target_tbody:
-            target_tbody = soup.select_one("div.table1 > table > tbody")
+            # 終了後や過去日付の場合はクラス名が変わる、あるいは table 直下の tbody になる
+            target_tbody = soup.select_one("div.table1 table tbody")
             if not target_tbody: logger.error("エラー: オッズtbodyが見つかりません。"); return None
 
         first_places = []
