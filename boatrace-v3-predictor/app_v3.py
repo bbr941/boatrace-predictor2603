@@ -18,6 +18,13 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import itertools
 import asyncio
+import logging
+import traceback
+import time
+
+# Logger setup
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 from data_fetcher import get_realtime_data
 import config
@@ -214,22 +221,36 @@ def get_ai_prediction(scraped_data, models):
     
     features_list = []
     for i in range(1, 7):
-        entry_row = entries[entries['boat_number'] == i].iloc[0]
-        racer_id = str(entry_row.get('racer_id', '0'))
-        racer_mapping = models.get('racer_mapping', {})
-        racer_enc = racer_mapping.get(racer_id, racer_mapping.get('global_mean', 0.2))
-        
-        features_list.append({
-            'venue_code': place_code,
-            'exhibition_time': before['exhibition_times'].get(i, 0.0),
-            'exhibition_start_timing': before['start_times'].get(i, 0.0),
-            'pred_course': before['exhibition_entry_courses'].get(i, i),
-            'nat_win_rate': entry_row.get('nat_win_rate', 0.0),
-            'motor_rate': entry_row.get('motor_quinella_rate', 0.0),
-            'boat_rate': entry_row.get('boat_quinella_rate', 0.0),
-            'racer_id': racer_id,
-            'racer_target_enc': racer_enc
-        })
+        try:
+            boat_entries = entries[entries['boat_number'] == i]
+            if boat_entries.empty:
+                logger.warning(f"Boat {i} not found in entries (scratching?). Using dummy data.")
+                entry_row = pd.Series({'racer_id': '0', 'nat_win_rate': 0.0, 'motor_quinella_rate': 0.0, 'boat_quinella_rate': 0.0})
+            else:
+                entry_row = boat_entries.iloc[0]
+            
+            racer_id = str(entry_row.get('racer_id', '0'))
+            racer_mapping = models.get('racer_mapping', {})
+            racer_enc = racer_mapping.get(racer_id, racer_mapping.get('global_mean', 0.2))
+            
+            features_list.append({
+                'venue_code': place_code,
+                'exhibition_time': before['exhibition_times'].get(i, 0.0),
+                'exhibition_start_timing': before['start_times'].get(i, 0.0),
+                'pred_course': before['exhibition_entry_courses'].get(i, i),
+                'nat_win_rate': entry_row.get('nat_win_rate', 0.0),
+                'motor_rate': entry_row.get('motor_quinella_rate', 0.0),
+                'boat_rate': entry_row.get('boat_quinella_rate', 0.0),
+                'racer_id': racer_id,
+                'racer_target_enc': racer_enc
+            })
+        except Exception as e:
+            logger.error(f"Error processing boat {i}: {e}")
+            # Fallback for this boat
+            features_list.append({
+                'venue_code': place_code, 'exhibition_time': 0.0, 'exhibition_start_timing': 0.0, 'pred_course': i,
+                'nat_win_rate': 0.0, 'motor_rate': 0.0, 'boat_rate': 0.0, 'racer_id': '0', 'racer_target_enc': 0.2
+            })
     
     X = pd.DataFrame(features_list)
     def zscore(x):
@@ -359,20 +380,26 @@ def main():
             st.error("Failed to fetch data. The race might not have happened or network is down.")
             return
 
-        # V5 AI Prediction Core
-        win_dict, trifecta_probs, X_debug = get_ai_prediction(scraped_data, models)
-        odds_info = scraped_data['odds_info']
-        
-        if debug_mode:
-            with st.expander("🛠 Raw Data Debug View"):
-                st.write(f"**Fetched At:** {datetime.datetime.now()}")
-                st.write(f"**Inference Features (V5 Stacking Mode):**")
-                st.dataframe(X_debug)
-                st.write("**Raw Odds (Sample):**")
-                st.write(list(odds_info.items())[:10])
+        try:
+            # V5 AI Prediction Core
+            win_dict, trifecta_probs, X_debug = get_ai_prediction(scraped_data, models)
+            odds_info = scraped_data['odds_info']
+            
+            if debug_mode:
+                with st.expander("🛠 Raw Data Debug View"):
+                    st.write(f"**Fetched At:** {datetime.datetime.now()}")
+                    st.write(f"**Inference Features (V5 Stacking Mode):**")
+                    st.dataframe(X_debug)
+                    st.write("**Raw Odds (Sample):**")
+                    st.write(list(odds_info.items())[:10])
 
-        # 3. Apply Strategy with REAL ODDS
-        rec_df = apply_betting_strategies(trifecta_probs, odds_info, budget, ev_threshold, kelly_coef, strategy)
+            # 3. Apply Strategy with REAL ODDS
+            rec_df = apply_betting_strategies(trifecta_probs, odds_info, budget, ev_threshold, kelly_coef, strategy)
+        except Exception as e:
+            st.error(f"Prediction Error: {e}")
+            st.code(traceback.format_exc())
+            logger.error(f"Prediction flow failed: {e}")
+            return
         
         if not rec_df.empty:
             st.subheader(f"🎯 Recommended Bets (Mode: {strategy_mode})")
