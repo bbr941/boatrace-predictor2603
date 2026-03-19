@@ -200,6 +200,15 @@ def apply_betting_strategies(trifecta_probs, odds_dict, budget, ev_threshold, ke
     
     return df.sort_values('EV', ascending=False)
 
+def softmax_calibration(scores, group_sizes):
+    probs = np.zeros_like(scores)
+    idx = 0
+    for size in group_sizes:
+        if size == 0: continue
+        s = scores[idx:idx+size]
+        e_x = np.exp(s - np.max(s))
+        probs[idx:idx+size] = e_x / e_x.sum()
+        idx += size
     return probs
 
 def show_recommendations(rec_df, strategy_mode, ev_threshold):
