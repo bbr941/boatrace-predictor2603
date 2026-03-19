@@ -200,16 +200,31 @@ def apply_betting_strategies(trifecta_probs, odds_dict, budget, ev_threshold, ke
     
     return df.sort_values('EV', ascending=False)
 
-def softmax_calibration(scores, group_sizes):
-    probs = np.zeros_like(scores)
-    idx = 0
-    for size in group_sizes:
-        if size == 0: continue
-        s = scores[idx:idx+size]
-        e_x = np.exp(s - np.max(s))
-        probs[idx:idx+size] = e_x / e_x.sum()
-        idx += size
     return probs
+
+def show_recommendations(rec_df, strategy_mode, ev_threshold):
+    """推奨買い目の表示用共通関数"""
+    if not rec_df.empty:
+        st.subheader(f"🎯 {strategy_mode} Recommendations")
+        
+        total_inv = rec_df['Investment'].sum()
+        total_ev_avg = rec_df['EV'].mean()
+        max_payout = rec_df['Expected Return'].max()
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Investment", f"¥{total_inv:,.0f}")
+        c2.metric("Avg EV", f"{total_ev_avg:.2f}")
+        c3.metric("Max Payout", f"¥{max_payout:,.0f}")
+        
+        st.dataframe(rec_df[['Combination', 'Prob', 'Odds', 'EV', 'Investment', 'Expected Return']].style.format({
+            'Prob': '{:.2%}',
+            'Odds': '{:.1f}',
+            'EV': '{:.2f}',
+            'Investment': '¥{:,.0f}',
+            'Expected Return': '¥{:,.0f}'
+        }), use_container_width=True)
+    else:
+        st.warning(f"No {strategy_mode} bets met the criteria (EV >= {ev_threshold}).")
 
 def get_ai_prediction(scraped_data, models):
     """取得データとモデルを用いて予測を実行し、買い目と確信度を返す"""
@@ -348,11 +363,16 @@ def main():
         
     st.sidebar.divider()
     
-    # --- V5: Scan Button ---
+    # --- V5: Strategy Buttons ---
+    calc_col1, calc_col2 = st.sidebar.columns(2)
+    single_btn = calc_col1.button("Predict (Single)")
+    compare_btn = calc_col2.button("🚀 Compare Both")
+    
+    st.sidebar.divider()
     if st.sidebar.button("🔍 Scan Today's Recommendation"):
         st.session_state['scan_triggered'] = True
     
-    debug_mode = st.sidebar.checkbox("Debug Mode (Show Raw Scraping Data)")
+    debug_mode = st.sidebar.checkbox("Debug Mode")
     
     date_dt, venue_name, race_no = get_race_selection()
     date_str = date_dt.strftime("%Y%m%d")
@@ -363,12 +383,12 @@ def main():
     
     models = load_models()
     
-    if st.button("Calculate Investment"):
+    if single_btn or compare_btn:
         if models is None:
             st.error("Models failed to load.")
             return
 
-        with st.spinner("Fetching real-time data from official site..."):
+        with st.spinner("Analyzing race data..."):
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
@@ -377,54 +397,46 @@ def main():
                 loop.close()
         
         if not scraped_data:
-            st.error("Failed to fetch data. The race might not have happened or network is down.")
+            st.error("Failed to fetch data. Check race schedule or network.")
             return
 
         try:
-            # V5 AI Prediction Core
+            # AI Inference (Once)
             win_dict, trifecta_probs, X_debug = get_ai_prediction(scraped_data, models)
             odds_info = scraped_data['odds_info']
             
             if debug_mode:
                 with st.expander("🛠 Raw Data Debug View"):
-                    st.write(f"**Fetched At:** {datetime.datetime.now()}")
-                    st.write(f"**Inference Features (V5 Stacking Mode):**")
-                    st.dataframe(X_debug)
-                    st.write("**Raw Odds (Sample):**")
-                    st.write(list(odds_info.items())[:10])
+                    st.write(f"**Inference Features:**"); st.dataframe(X_debug)
+                    st.write("**Raw Odds (Sample):**"); st.write(list(odds_info.items())[:10])
 
-            # 3. Apply Strategy with REAL ODDS
-            rec_df = apply_betting_strategies(trifecta_probs, odds_info, budget, ev_threshold, kelly_coef, strategy)
+            # Execution Logic
+            if compare_btn:
+                st.header("⚖️ Dual Strategy Comparison")
+                col_inv, col_enjoy = st.columns(2)
+                
+                with col_inv:
+                    # Investment Mode: EV 1.2+, Kelly
+                    df_inv = apply_betting_strategies(trifecta_probs, odds_info, budget, 1.2, kelly_coef, strategy)
+                    show_recommendations(df_inv, "Investment (Strict)", 1.2)
+                
+                with col_enjoy:
+                    # Enjoy Mode: EV 0.85+, Flat (via Small Kelly)
+                    # Filter by Prob >= 3.0% for realistic enjoyment
+                    enjoy_probs = {k: v for k, v in trifecta_probs.items() if v >= 0.03}
+                    df_enjoy = apply_betting_strategies(enjoy_probs, odds_info, budget, 0.85, 0.1, "Kelly")
+                    show_recommendations(df_enjoy, "Enjoy (Relaxed)", 0.85)
+            else:
+                # Single Mode (Original)
+                rec_df = apply_betting_strategies(trifecta_probs, odds_info, budget, ev_threshold, kelly_coef, strategy)
+                show_recommendations(rec_df, strategy_mode, ev_threshold)
+                st.divider()
+                run_simulation_backtest(models)
         except Exception as e:
             st.error(f"Prediction Error: {e}")
             st.code(traceback.format_exc())
             logger.error(f"Prediction flow failed: {e}")
             return
-        
-        if not rec_df.empty:
-            st.subheader(f"🎯 Recommended Bets (Mode: {strategy_mode})")
-            
-            total_inv = rec_df['Investment'].sum()
-            total_ev_avg = rec_df['EV'].mean()
-            max_payout = rec_df['Expected Return'].max()
-            
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Total Investment", f"¥{total_inv:,.0f}")
-            col2.metric("Avg Expected Value", f"{total_ev_avg:.2f}")
-            col3.metric("Max Potential Payout", f"¥{max_payout:,.0f}")
-            
-            st.dataframe(rec_df[['Combination', 'Prob', 'Odds', 'EV', 'Investment', 'Expected Return']].style.format({
-                'Prob': '{:.2%}',
-                'Odds': '{:.1f}',
-                'EV': '{:.2f}',
-                'Investment': '¥{:,.0f}',
-                'Expected Return': '¥{:,.0f}'
-            }))
-        else:
-            st.warning(f"No recommendations met the EV threshold ({ev_threshold}) in {strategy_mode}.")
-            
-        st.divider()
-        run_simulation_backtest(models)
         
 
     # --- V5: Global Scan Results ---
