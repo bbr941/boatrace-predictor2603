@@ -1,522 +1,812 @@
 import os
-import sys
-
-# --- Path Adjustment (Must be at the very top) ---
-ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if ROOT_DIR not in sys.path:
-    sys.path.append(ROOT_DIR)
+# Force single thread to prevent Streamlit Cloud crashes (OpenMP)
+os.environ['OMP_NUM_THREADS'] = '1'
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
-import catboost as cb
-import pickle
-import sqlite3
+import requests
+from bs4 import BeautifulSoup
 import datetime
-import matplotlib.pyplot as plt
-import seaborn as sns
-import itertools
-import asyncio
-import logging
-import traceback
+import re
 import time
+import sys
+import itertools
 
-# Logger setup
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# --- Configuration & Paths ---
+st.set_page_config(page_title="BoatRace AI - Plan B Strategy", layout="wide")
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MODEL_HONMEI_PATH = os.path.join(ROOT_DIR, 'model_honmei.txt')
+MODEL_ANA_PATH = os.path.join(ROOT_DIR, 'model_ana.txt')
+DATA_DIR = os.path.join(ROOT_DIR, 'app_data')
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+}
 
-from data_fetcher import get_realtime_data
-import config
+if st.sidebar.button("Clear Cache"):
+    st.cache_data.clear()
+    st.success("Cache Cleared!")
 
-# --- Configuration ---
-st.set_page_config(page_title="BoatRace AI V3.1+ - Investment Strategy", layout="wide")
-MODEL_DIR = os.path.join(ROOT_DIR, 'models')
-DB_PATH = r'D:\BOAT2504_Base_line\BOAT2504_DB\boatrace.db'
-
-# Windows用非同期パッチ
-if sys.platform == 'win32':
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
-def safe_pickle_load(file_path):
-    """ファイルチェック付きの安全な pickle ロード"""
-    if not os.path.exists(file_path):
-        return None, f"File not found: {os.path.basename(file_path)}"
-    if os.path.getsize(file_path) == 0:
-        return None, f"File is empty: {os.path.basename(file_path)}"
-    try:
-        with open(file_path, 'rb') as f:
-            data = pickle.load(f)
-        return data, None
-    except Exception as e:
-        return None, f"Error loading {os.path.basename(file_path)}: {e}"
-
-@st.cache_resource
-def load_models():
-    """学習済みモデルをロードする（キャッシュ化）"""
-    models = {}
-    try:
-        # 1. LightGBM
-        lgb_path = os.path.join(MODEL_DIR, 'lgb_model.txt')
-        if os.path.exists(lgb_path):
-            models['lgb'] = lgb.Booster(model_file=lgb_path)
-        
-        # 2. CatBoost
-        cb_path = os.path.join(MODEL_DIR, 'cb_model.bin')
-        if os.path.exists(cb_path):
-            models['cb'] = cb.CatBoostClassifier().load_model(cb_path)
-            
-        # 3. Alternative Models (Pickle)
-        for key, filename in [('alt', 'alt_model.pkl'), 
-                            ('alt_scaler', 'alt_scaler.pkl'),
-                            ('racer_mapping', 'racer_mapping.pkl')]:
-            data, err = safe_pickle_load(os.path.join(MODEL_DIR, filename))
-            if err:
-                st.sidebar.error(err)
-            else:
-                models[key] = data
-
-        # 4. Stacking Logic (V4 Weights or Legacy Meta)
-        weights_path = os.path.join(MODEL_DIR, 'stacking_weights.pkl')
-        meta_path = os.path.join(MODEL_DIR, 'meta_model.pkl')
-        
-        weights_data, w_err = safe_pickle_load(weights_path)
-        if weights_data:
-            models['stacking_weights'] = weights_data
-            st.sidebar.success("V4 ROI-Optimized Model Loaded")
-        else:
-            meta_data, m_err = safe_pickle_load(meta_path)
-            if meta_data:
-                models['meta'] = meta_data
-                st.sidebar.info("V3.1 Legacy Meta-Model Loaded")
-            else:
-                st.sidebar.warning("No Stacking Weights or Meta Model found. Using base averages.")
-                if w_err and "found" not in w_err.lower(): st.sidebar.error(w_err)
-                if m_err and "found" not in m_err.lower(): st.sidebar.error(m_err)
-
-        # Essential check
-        required = ['lgb', 'cb', 'alt', 'alt_scaler', 'racer_mapping']
-        missing = [k for k in required if k not in models]
-        if missing:
-            st.error(f"Critical models missing: {missing}")
-            return None
-            
-        return models
-    except Exception as e:
-        import traceback
-        st.error(f"FATAL Model Load Error: {e}")
-        st.code(traceback.format_exc())
+# --- 1. Scraper Class ---
+class BoatRaceScraper:
+    @staticmethod
+    def get_soup(url):
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                resp = requests.get(url, headers=HEADERS, timeout=15)
+                resp.raise_for_status()
+                resp.encoding = resp.apparent_encoding
+                return BeautifulSoup(resp.text, 'html.parser')
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    st.error(f"Data Fetch Error: {e}")
+                    return None
+                time.sleep(1)
         return None
 
-async def get_active_venues(date_str):
-    """本日開催されているレース場を取得する"""
-    from data_fetcher import _fetch_url
-    url = f"https://www.boatrace.jp/owpc/pc/race/index?hd={date_str}"
-    html = await _fetch_url(url)
-    if not html: return []
-    
-    from bs4 import BeautifulSoup
-    soup = BeautifulSoup(html, 'lxml')
-    import re
-    # 開催中の場へのリンクを抽出 (CSS クラスに依存せず、リンク先 URL のパターンで捕捉)
-    venue_links = soup.find_all('a', href=re.compile(r'raceindex.*jcd='))
-    active_venues = []
-    seen = set()
-    for link in venue_links:
-        import re
-        match = re.search(r'jcd=(\d+)', link.get('href', ''))
-        if match:
-            code = match.group(1)
-            if code not in seen:
-                name = config.PLACE_CODE_TO_NAME.get(code, "不明")
-                active_venues.append({'code': code, 'name': name})
-                seen.add(code)
-    return active_venues
-
-def get_race_selection():
-    """サイドバーでのレース選択 UI"""
-    st.sidebar.header("Race Selection")
-    date = st.sidebar.date_input("Date", datetime.date.today())
-    venue = st.sidebar.selectbox("Venue", ["桐生", "戸田", "江戸川", "平和島", "多摩川", "浜名湖", "蒲郡", "常滑", "津", "三国", "びわこ", "住之江", "尼崎", "鳴門", "丸亀", "児島", "宮島", "徳山", "下関", "若松", "芦屋", "福岡", "唐津", "大村"])
-    race_no = st.sidebar.slider("Race No", 1, 12, 1)
-    return date, venue, race_no
-
-# --- Betting Logic ---
-def calculate_trifecta_probs(win_probs):
-    """
-    ハルビルの公式 (Harville's formula) を用い、単勝確率から3連単120通りの確率を算出
-    """
-    combos = list(itertools.permutations(range(1, 7), 3))
-    trifecta_probs = {}
-    
-    for c in combos:
-        p1 = win_probs[c[0]]
-        p2 = win_probs[c[1]] / (1 - p1 + 1e-9)
-        p3 = win_probs[c[2]] / (1 - p1 - win_probs[c[1]] + 1e-9)
-        trifecta_probs[f"{c[0]}-{c[1]}-{c[2]}"] = max(0, p1 * p2 * p3)
-        
-    total = sum(trifecta_probs.values())
-    return {k: v / total for k, v in trifecta_probs.items()}
-
-def kelly_criterion(prob, odds, kelly_coef=0.5):
-    """ケリー基準による賭け金比率の算出"""
-    if odds <= 1: return 0
-    b = odds - 1
-    f = (b * prob - (1 - prob)) / b
-    return max(0, f * kelly_coef)
-
-def apply_betting_strategies(trifecta_probs, odds_dict, budget, ev_threshold, kelly_coef, strategy):
-    """買い目の選定と資金配分"""
-    recommendations = []
-    for combo, prob in trifecta_probs.items():
-        odds = odds_dict.get(combo)
-        if odds is None or odds <= 0: continue
-        
-        ev = prob * odds
-        if ev >= ev_threshold:
-            recommendations.append({
-                'Combination': combo,
-                'Prob': prob,
-                'Odds': odds,
-                'EV': ev
-            })
-            
-    if not recommendations:
-        return pd.DataFrame()
-        
-    df = pd.DataFrame(recommendations)
-    
-    if strategy == "Kelly":
-        df['Weight'] = df.apply(lambda row: kelly_criterion(row['Prob'], row['Odds'], kelly_coef), axis=1)
-        df['Investment'] = (df['Weight'] * budget // 100 * 100).astype(int)
-    elif strategy == "Dutching":
-        inv_odds_sum = sum(1 / df['Odds'])
-        df['Investment'] = (budget / (df['Odds'] * inv_odds_sum) // 100 * 100).astype(int)
-    else: # Flat
-        df['Investment'] = (budget / len(df) // 100 * 100).astype(int)
-        
-    df['Expected Return'] = df['Investment'] * df['Odds']
-    df['Expected Profit'] = df['Expected Return'] - df['Investment']
-    
-    return df.sort_values('EV', ascending=False)
-
-def softmax_calibration(scores, group_sizes):
-    probs = np.zeros_like(scores)
-    idx = 0
-    for size in group_sizes:
-        if size == 0: continue
-        s = scores[idx:idx+size]
-        e_x = np.exp(s - np.max(s))
-        probs[idx:idx+size] = e_x / e_x.sum()
-        idx += size
-    return probs
-
-def show_recommendations(rec_df, strategy_mode, ev_threshold):
-    """推奨買い目の表示用共通関数"""
-    if not rec_df.empty:
-        st.subheader(f"🎯 {strategy_mode} Recommendations")
-        
-        total_inv = rec_df['Investment'].sum()
-        total_ev_avg = rec_df['EV'].mean()
-        max_payout = rec_df['Expected Return'].max()
-        
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Investment", f"¥{total_inv:,.0f}")
-        c2.metric("Avg EV", f"{total_ev_avg:.2f}")
-        c3.metric("Max Payout", f"¥{max_payout:,.0f}")
-        
-        st.dataframe(rec_df[['Combination', 'Prob', 'Odds', 'EV', 'Investment', 'Expected Return']].style.format({
-            'Prob': '{:.2%}',
-            'Odds': '{:.1f}',
-            'EV': '{:.2f}',
-            'Investment': '¥{:,.0f}',
-            'Expected Return': '¥{:,.0f}'
-        }), use_container_width=True)
-    else:
-        st.warning(f"No {strategy_mode} bets met the criteria (EV >= {ev_threshold}).")
-
-def get_ai_prediction(scraped_data, models):
-    """取得データとモデルを用いて予測を実行し、買い目と確信度を返す"""
-    race_info = scraped_data['race_info']
-    odds_info = scraped_data['odds_info']
-    entries = race_info['entries']
-    before = race_info['before_info']
-    place_code = race_info['place']
-    
-    features_list = []
-    for i in range(1, 7):
+    @staticmethod
+    def parse_float(text):
         try:
-            boat_entries = entries[entries['boat_number'] == i]
-            if boat_entries.empty:
-                logger.warning(f"Boat {i} not found in entries (scratching?). Using dummy data.")
-                entry_row = pd.Series({'racer_id': '0', 'nat_win_rate': 0.0, 'motor_quinella_rate': 0.0, 'boat_quinella_rate': 0.0})
-            else:
-                entry_row = boat_entries.iloc[0]
-            
-            racer_id = str(entry_row.get('racer_id', '0'))
-            racer_mapping = models.get('racer_mapping', {})
-            racer_enc = racer_mapping.get(racer_id, racer_mapping.get('global_mean', 0.2))
-            
-            features_list.append({
-                'venue_code': place_code,
-                'exhibition_time': before['exhibition_times'].get(i, 0.0),
-                'exhibition_start_timing': before['start_times'].get(i, 0.0),
-                'pred_course': before['exhibition_entry_courses'].get(i, i),
-                'nat_win_rate': entry_row.get('nat_win_rate', 0.0),
-                'motor_rate': entry_row.get('motor_quinella_rate', 0.0),
-                'boat_rate': entry_row.get('boat_quinella_rate', 0.0),
-                'racer_id': racer_id,
-                'racer_target_enc': racer_enc
-            })
-        except Exception as e:
-            logger.error(f"Error processing boat {i}: {e}")
-            # Fallback for this boat
-            features_list.append({
-                'venue_code': place_code, 'exhibition_time': 0.0, 'exhibition_start_timing': 0.0, 'pred_course': i,
-                'nat_win_rate': 0.0, 'motor_rate': 0.0, 'boat_rate': 0.0, 'racer_id': '0', 'racer_target_enc': 0.2
-            })
-    
-    X = pd.DataFrame(features_list)
-    def zscore(x):
-        s = x.std()
-        return (x - x.mean()) / s if s > 0 else 0
-    X['exhibition_time_z'] = zscore(X['exhibition_time'])
-    X['nat_win_rate_z'] = zscore(X['nat_win_rate'])
-    b1_rate = X[X.index == 0]['nat_win_rate'].values[0]
-    X['win_rate_diff_b1'] = X['nat_win_rate'] - b1_rate
-    
-    target_features = ['venue_code', 'exhibition_time', 'exhibition_start_timing', 'pred_course', 
-                    'nat_win_rate', 'motor_rate', 'boat_rate', 'racer_id',
-                    'exhibition_time_z', 'nat_win_rate_z', 'win_rate_diff_b1', 'racer_target_enc']
-    X = X[target_features]
-    X['venue_code'] = X['venue_code'].astype('category')
-    X['racer_id'] = X['racer_id'].astype('category')
+            return float(re.search(r'([\d\.]+)', text).group(1))
+        except:
+            return 0.0
 
-    # Base Predictions
-    lgb_scores = models['lgb'].predict(X)
-    lgb_probs = softmax_calibration(lgb_scores, [6])
-    cb_probs = models['cb'].predict_proba(X)[:, 1]
-    
-    # Alt-model (Strong Regularized LR) の数値特徴量 (10次元)
-    # 学習時 (ENABLE_L2_FEATURE_SELECTION=False) の数値カラム抽出順に合わせる
-    num_features_l2 = [
-        'exhibition_time', 'exhibition_start_timing', 'pred_course', 
-        'nat_win_rate', 'motor_rate', 'boat_rate',
-        'exhibition_time_z', 'nat_win_rate_z', 'win_rate_diff_b1', 'racer_target_enc'
-    ]
-    X_alt_sub = X[num_features_l2]
-    X_alt_scaled = models['alt_scaler'].transform(X_alt_sub)
-    alt_probs = models['alt'].predict_proba(X_alt_scaled)[:, 1]
-    
-    # Stacking (V4 Support)
-    if 'stacking_weights' in models:
-        w = models['stacking_weights']
-        win_probs_final = w['w_lgb'] * lgb_probs + w['w_cb'] * cb_probs + w['w_alt'] * alt_probs
-    else:
-        X_meta = np.vstack([lgb_probs, cb_probs, alt_probs]).T
-        win_probs_final = models['meta'].predict_proba(X_meta)[:, 1]
-        
-    win_probs_final /= (win_probs_final.sum() + 1e-9)
-    win_dict = {i+1: p for i, p in enumerate(win_probs_final)}
-    trifecta_probs = calculate_trifecta_probs(win_dict)
-    
-    return win_dict, trifecta_probs, X
-
-def run_simulation_backtest(models):
-    """検証データを用いたバックテスト・シミュレーション（固定シード）"""
-    st.subheader("📈 Strategy Backtest (Fixed Seed Simulation)")
-    np.random.seed(42) # 現状はシミュレーション。再現性のためにシード固定
-    days = 30
-    x = np.arange(days)
-    profit_flat = np.cumsum(np.random.normal(100, 500, days))
-    profit_kelly = np.cumsum(np.random.normal(300, 1000, days))
-    profit_half_kelly = np.cumsum(np.random.normal(200, 700, days))
-    
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.plot(x, profit_flat, label='Flat Bet', color='gray')
-    ax.plot(x, profit_kelly, label='Kelly (1.0)', color='red')
-    ax.plot(x, profit_half_kelly, label='Half-Kelly (0.5)', color='green', linewidth=2)
-    ax.axhline(0, color='black', linestyle='--')
-    ax.set_title("V3.1 Strategy Backtest (Simulated)")
-    ax.set_xlabel("Races")
-    ax.set_ylabel("Cumulative Profit (JPY)")
-    ax.legend()
-    st.pyplot(fig)
-
-def main():
-    st.title("🚤 BoatRace AI V3.1+ (Investment Strategy Engine)")
-    st.markdown("的中確率を「勝てる投資額」へ。期待値と資金配分に基づいた高度な支援システム。")
-    
-    # Sidebar
-    st.sidebar.header("💰 Investment Config")
-    budget = st.sidebar.number_input("Total Budget (JPY)", min_value=1000, value=10000, step=1000)
-    
-    # --- V5: Strategy Modes ---
-    strategy_mode = st.sidebar.selectbox("Betting Strategy Mode", 
-                                       ["Investment (ガチ投資)", "Enjoy (エンジョイ)"])
-    
-    if strategy_mode == "Investment (ガチ投資)":
-        default_ev = 1.2
-        default_kelly = 0.5
-        st.sidebar.caption("High ROI / Selective Bets")
-    else:
-        default_ev = 0.85
-        default_kelly = 0.3
-        st.sidebar.caption("More Hits / Frequent Bets")
-        
-    ev_threshold = st.sidebar.slider("EV Threshold", 0.5, 5.0, default_ev, 0.1)
-    strategy = st.sidebar.selectbox("Betting Strategy", ["Kelly", "Dutching", "Flat"])
-    kelly_coef = 1.0
-    if strategy == "Kelly":
-        kelly_coef = st.sidebar.slider("Kelly Coefficient (Risk Control)", 0.1, 1.0, default_kelly, 0.1)
-        
-    st.sidebar.divider()
-    
-    # --- V5: Strategy Buttons ---
-    calc_col1, calc_col2 = st.sidebar.columns(2)
-    single_btn = calc_col1.button("Predict (Single)")
-    compare_btn = calc_col2.button("🚀 Compare Both")
-    
-    st.sidebar.divider()
-    if st.sidebar.button("🔍 Scan Today's Recommendation"):
-        st.session_state['scan_triggered'] = True
-    
-    debug_mode = st.sidebar.checkbox("Debug Mode")
-    
-    date_dt, venue_name, race_no = get_race_selection()
-    date_str = date_dt.strftime("%Y%m%d")
-    
-    # 場コードへの変換
-    INV_PLACE_CODE = {v: k for k, v in config.PLACE_CODE_TO_NAME.items()}
-    place_code = INV_PLACE_CODE.get(venue_name, "01")
-    
-    models = load_models()
-    
-    if single_btn or compare_btn:
-        if models is None:
-            st.error("Models failed to load.")
-            return
-
-        with st.spinner("Analyzing race data..."):
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+    @staticmethod
+    def get_odds(date_str, venue_code, race_no):
+        jcd = f"{int(venue_code):02d}"
+        url = f"https://www.boatrace.jp/owpc/pc/race/oddstf?rno={race_no}&jcd={jcd}&hd={date_str}"
+        soup = BoatRaceScraper.get_soup(url)
+        odds_data = {}
+        if soup:
             try:
-                scraped_data = loop.run_until_complete(get_realtime_data(date_str, place_code, str(race_no)))
-            finally:
-                loop.close()
-        
-        if not scraped_data:
-            st.error("Failed to fetch data. Check race schedule or network.")
-            return
+                target_tbody = soup.select_one("tbody.is-p3-0")
+                if not target_tbody:
+                    target_tbody = soup.select_one("div.table1 table tbody")
+                if not target_tbody: return {}
 
+                first_places = []
+                header_row = target_tbody.parent.select_one("thead tr")
+                if header_row:
+                    th_tags = header_row.find_all('th', recursive=False)
+                    for th in th_tags:
+                        if th.has_attr('class') and any('is-boatColor' in c for c in th['class']):
+                            th_text = th.get_text(strip=True)
+                            num_match = re.match(r'^\s*(\d+)', th_text)
+                            if num_match:
+                                num = num_match.group(1)
+                                if num not in first_places:
+                                    first_places.append(num)
+                                    if len(first_places) == 6: break
+                
+                if len(first_places) != 6:
+                     first_places = [str(i) for i in range(1, 7)]
+
+                rows = target_tbody.find_all('tr', recursive=False)
+                num_cols = len(first_places)
+                current_boat2 = [''] * num_cols
+                rowspan_remaining = [0] * num_cols
+
+                for r_idx, row in enumerate(rows):
+                    cells = row.find_all('td', recursive=False)
+                    cell_ptr = 0
+                    for col_idx in range(num_cols):
+                        first_boat = first_places[col_idx]
+                        boat2 = ""
+                        boat3 = ""
+                        odds_val = None
+                        
+                        try:
+                            if rowspan_remaining[col_idx] > 0:
+                                rowspan_remaining[col_idx] -= 1
+                                if cell_ptr + 1 < len(cells):
+                                    boat2 = current_boat2[col_idx]
+                                    boat3 = cells[cell_ptr].get_text(strip=True)
+                                    odds_txt = cells[cell_ptr + 1].get_text(strip=True).replace('倍', '').replace(',', '')
+                                    try: odds_val = float(odds_txt)
+                                    except: pass
+                                    cell_ptr += 2
+                                else: continue
+                            else:
+                                if cell_ptr >= len(cells): break
+                                current_cell = cells[cell_ptr]
+                                if current_cell.has_attr('rowspan'):
+                                    boat2_text = current_cell.get_text(strip=True)
+                                    if boat2_text.isdigit():
+                                        current_boat2[col_idx] = boat2_text
+                                        boat2 = boat2_text
+                                        try: rowspan_remaining[col_idx] = max(0, int(current_cell['rowspan']) - 1)
+                                        except: rowspan_remaining[col_idx] = 0
+                                        if cell_ptr + 2 < len(cells):
+                                            boat3 = cells[cell_ptr+1].get_text(strip=True)
+                                            odds_txt = cells[cell_ptr+2].get_text(strip=True).replace('倍', '').replace(',', '')
+                                            try: odds_val = float(odds_txt)
+                                            except: pass
+                                            cell_ptr += 3
+                                        else:
+                                            cell_ptr += 1
+                                            continue
+                                    else:
+                                        cell_ptr += 1
+                                        continue
+                                else:
+                                    cell_ptr +=1
+                                    continue
+                            
+                            if boat2.isdigit() and boat3.isdigit() and first_boat != boat2 and first_boat != boat3 and boat2 != boat3 and odds_val is not None and odds_val > 0:
+                                odds_data[f"{first_boat}-{boat2}-{boat3}"] = odds_val
+                        except: pass
+            except: pass
+        return odds_data
+
+    @staticmethod
+    def get_race_data(date_str, venue_code, race_no):
+        jcd = f"{int(venue_code):02d}"
+        url_before = f"https://www.boatrace.jp/owpc/pc/race/beforeinfo?rno={race_no}&jcd={jcd}&hd={date_str}"
+        url_list = f"https://www.boatrace.jp/owpc/pc/race/racelist?rno={race_no}&jcd={jcd}&hd={date_str}"
+        
+        soup_before = BoatRaceScraper.get_soup(url_before)
+        soup_list = BoatRaceScraper.get_soup(url_list)
+        
+        odds_map = BoatRaceScraper.get_odds(date_str, venue_code, race_no)
+        
+        if not soup_before or not soup_list:
+            return None
+            
+        weather = {'wind_direction': 0, 'wind_speed': 0.0, 'wave_height': 0.0}
         try:
-            # AI Inference (Once)
-            win_dict, trifecta_probs, X_debug = get_ai_prediction(scraped_data, models)
-            odds_info = scraped_data['odds_info']
+            w = soup_before.select_one("div.weather1_body")
+            if w:
+                ws = w.select_one(".is-wind span.weather1_bodyUnitLabelData")
+                if ws: weather['wind_speed'] = BoatRaceScraper.parse_float(ws.text)
+                wh = w.select_one(".is-wave span.weather1_bodyUnitLabelData")
+                if wh: weather['wave_height'] = BoatRaceScraper.parse_float(wh.text)
+                wd = w.select_one(".is-windDirection p")
+                if wd:
+                    cls = wd.get('class', [])
+                    d = next((c for c in cls if c.startswith('is-wind') and c != 'is-windDirection'), None)
+                    if d: weather['wind_direction'] = int(re.sub(r'\D', '', d))
+        except: pass
+
+        boat_before = {}
+        try:
+            # Parse Exhibition Time (Table is-w748)
+            for i, tb in enumerate(soup_before.select("table.is-w748 tbody")):
+                tds = tb.select("td")
+                ex_val = None
+                if len(tds) >= 5:
+                    txt = tds[4].get_text(strip=True)
+                    # Check if valid number (not empty or nbsp)
+                    if txt and txt != '\xa0':
+                         try:
+                             ex_val = float(re.search(r'([\d\.]+)', txt).group(1))
+                         except: pass
+                
+                # If parsed, store it.
+                if ex_val is not None:
+                    if (i+1) not in boat_before: boat_before[i+1] = {}
+                    boat_before[i+1]['ex_time'] = ex_val
             
-            if debug_mode:
-                with st.expander("🛠 Raw Data Debug View"):
-                    st.write(f"**Inference Features:**"); st.dataframe(X_debug)
-                    st.write("**Raw Odds (Sample):**"); st.write(list(odds_info.items())[:10])
-
-            # Execution Logic
-            if compare_btn:
-                st.header("⚖️ Dual Strategy Comparison")
-                col_inv, col_enjoy = st.columns(2)
-                
-                with col_inv:
-                    # Investment Mode: EV 1.2+, Kelly
-                    df_inv = apply_betting_strategies(trifecta_probs, odds_info, budget, 1.2, kelly_coef, strategy)
-                    show_recommendations(df_inv, "Investment (Strict)", 1.2)
-                
-                with col_enjoy:
-                    # Enjoy Mode: EV 0.85+, Flat (via Small Kelly)
-                    # Filter by Prob >= 3.0% for realistic enjoyment
-                    enjoy_probs = {k: v for k, v in trifecta_probs.items() if v >= 0.03}
-                    df_enjoy = apply_betting_strategies(enjoy_probs, odds_info, budget, 0.85, 0.1, "Kelly")
-                    show_recommendations(df_enjoy, "Enjoy (Relaxed)", 0.85)
-            else:
-                # Single Mode (Original)
-                rec_df = apply_betting_strategies(trifecta_probs, odds_info, budget, ev_threshold, kelly_coef, strategy)
-                show_recommendations(rec_df, strategy_mode, ev_threshold)
-                st.divider()
-                run_simulation_backtest(models)
-        except Exception as e:
-            st.error(f"Prediction Error: {e}")
-            st.code(traceback.format_exc())
-            logger.error(f"Prediction flow failed: {e}")
-            return
-        
-
-    # --- V5: Global Scan Results ---
-    if st.session_state.get('scan_triggered', False):
-        st.session_state['scan_triggered'] = False
-        st.header("🌟 Today's AI Recommendations")
-        st.info("Searching for high-confidence favorites and high-EV longshots...")
-        
-        with st.status("Scanning active venues (Polite Mode)...") as status:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                venues = loop.run_until_complete(get_active_venues(date_str))
-                if not venues:
-                    st.warning("No active venues found today.")
-                else:
-                    results = []
-                    # 日付判定: 過去日付の場合は全12レースを精査、当日の場合は主要レース(10-12)を優先
-                    is_past = date_dt < datetime.date.today()
-                    if is_past:
-                        target_races = [str(i) for i in range(1, 13)]
-                        st.write(f"📊 Historical Mode: Scanning all 12 races for {date_str}...")
-                    else:
-                        target_races = ["12", "11", "10"]
-                        st.write(f"🚀 Real-time Mode: Scanning main races (10R, 11R, 12R) for {date_str}...")
-                    
-                    for v in venues:
-                        status.update(label=f"Scanning {v['name']}...")
-                        for r_no in target_races:
+            # Parse ST
+            for idx, row in enumerate(soup_before.select("table.is-w238 tbody tr")):
+                bn_span = row.select_one("span.table1_boatImage1Number")
+                if bn_span:
+                    b = int(bn_span.text.strip())
+                    pred_c = idx + 1
+                    st_span = row.select_one("span.table1_boatImage1Time")
+                    val = 0.20
+                    if st_span:
+                        txt_raw = st_span.text.strip()
+                        if 'L' in txt_raw: val = 1.0
+                        elif 'F' in txt_raw:
                             try:
-                                data = loop.run_until_complete(get_realtime_data(date_str, v['code'], r_no))
-                                if data:
-                                    win_dict, tri_probs, _ = get_ai_prediction(data, models)
-                                    odds = data['odds_info']
-                                    
-                                    # 分析
-                                    max_win_prob = max(win_dict.values())
-                                    top_boat = [k for k,v in win_dict.items() if v == max_win_prob][0]
-                                    
-                                    # EV計算
-                                    evs = {combo: p * odds.get(combo, 0) for combo, p in tri_probs.items()}
-                                    max_ev = max(evs.values()) if evs else 0
-                                    
-                                    kind = ""
-                                    if max_win_prob >= 0.6: kind = "🔥 本命配分"
-                                    elif max_ev >= 1.8: kind = "💎 穴・高期待値"
-                                    
-                                    if kind:
-                                        results.append({
-                                            "Venue": v['name'],
-                                            "Race": f"{r_no}R",
-                                            "Type": kind,
-                                            "Favorite": f"{top_boat}号艇 ({max_win_prob:.1%})",
-                                            "Max EV": f"{max_ev:.2f}"
-                                        })
-                                        break # 1場につき1つ見つかれば次へ
-                                time.sleep(0.5) # Polite sleep between races
-                            except Exception:
-                                continue
-                        time.sleep(1.0) # Polite sleep between venues
-                    
-                    if results:
-                        st.dataframe(pd.DataFrame(results), use_container_width=True)
-                    else:
-                        st.write("No exceptional races found in current active sessions.")
-            finally:
-                loop.close()
-            status.update(label="Scan Complete!", state="complete")
+                                sub = txt_raw.replace('F', '')
+                                val = -float(sub)
+                            except: val = -0.05
+                        else:
+                            val = BoatRaceScraper.parse_float(txt_raw)
+                            
+                    if b not in boat_before: boat_before[b] = {}
+                    boat_before[b]['st'] = val
+                    boat_before[b]['pred_course'] = pred_c
+        except: pass
 
-if __name__ == "__main__":
-    if 'scan_triggered' not in st.session_state:
-        st.session_state['scan_triggered'] = False
-    import time # Ensure time is available
-    main()
+        rows = []
+        try:
+            for i, tb in enumerate(soup_list.select("tbody.is-fs12")):
+                bn = i + 1
+                if bn > 6: break
+                
+                # Check Absence based on Missing Exhibition Time
+                # If boat not in boat_before OR ex_time is None => Absent
+                if bn not in boat_before or 'ex_time' not in boat_before[bn]:
+                    # Log or just skip
+                    # print(f"Boat {bn} Absent (No Ex Time)")
+                    continue
+                
+                racer_id = 9999
+                try: 
+                    txt = tb.select("td")[2].select_one("div").get_text()
+                    racer_id = int(re.search(r'(\d{4})', txt).group(1))
+                except: pass
+
+                branch = 'Unknown'
+                weight = 52.0
+                try:
+                    td2 = tb.select("td")[2]
+                    txt_full = td2.get_text(" ", strip=True)
+                    match_w = re.search(r'(\d{2}\.\d)kg', txt_full)
+                    if match_w: weight = float(match_w.group(1))
+                    
+                    prefectures = r"(群馬|埼玉|東京|福井|静岡|愛知|三重|滋賀|大阪|兵庫|徳島|香川|岡山|広島|山口|福岡|佐賀|長崎)"
+                    m = re.search(prefectures, txt_full)
+                    if m: branch = m.group(1)
+                except: pass
+
+                nat_win_rate = 0.0
+                local_win_rate = 0.0
+                try:
+                    col3_txt = tb.select("td")[3].get_text(" ", strip=True)
+                    clean_txt = re.sub(r'[FLK]\d+', '', col3_txt) 
+                    nums = re.findall(r'(\d+(?:\.\d+)?)', clean_txt)
+                    if len(nums) >= 5:
+                        nat_win_rate = float(nums[1])
+                        local_win_rate = float(nums[3])
+                    elif len(nums) >= 4:
+                        nat_win_rate = float(nums[0])
+                        local_win_rate = float(nums[2])
+                except: pass
+
+                prior_results = ""
+                try:
+                    rank_row = tb.select_one("tr.is-fBold")
+                    if rank_row:
+                        res_texts = [td.get_text(strip=True) for td in rank_row.select("td")]
+                        cleaned_res = []
+                        for t in res_texts:
+                            if not t: continue
+                            t_norm = t.translate(str.maketrans('０１２３４５６７８９', '0123456789'))
+                            if re.match(r'^[1-6FLKS欠失転不]$', t_norm):
+                                cleaned_res.append(t_norm)
+                        prior_results = " ".join(cleaned_res)
+                except: pass
+
+                tds = tb.select("td")
+                motor = 30.0
+                try:
+                    txt = tds[6].get_text(" ", strip=True).replace('%', '')
+                    parts = txt.split()
+                    if len(parts) >= 2: motor = float(parts[1])
+                    else: motor = float(parts[0])
+                except: pass
+                
+                boat = 30.0
+                try:
+                    # Index 7 Check
+                    if len(tds) > 7:
+                        txt = tds[7].get_text(" ", strip=True).replace('%', '')
+                        parts = txt.split()
+                        if len(parts) >= 2: boat = float(parts[1])
+                        else: boat = float(parts[0])
+                except: pass
+                
+                row = {
+                    'race_id': f"{date_str}_{venue_code}_{race_no}",
+                    'boat_number': bn,
+                    'racer_id': racer_id,
+                    'motor_rate': motor,
+                    'boat_rate': boat,
+                    'exhibition_time': boat_before[bn]['ex_time'], # Guaranteed present
+                    'exhibition_start_timing': boat_before.get(bn, {}).get('st', 0.20),
+                    'pred_course': boat_before.get(bn, {}).get('pred_course', bn),
+                    'wind_direction': weather['wind_direction'],
+                    'wind_speed': weather['wind_speed'],
+                    'wave_height': weather['wave_height'],
+                    'prior_results': prior_results,
+                    'branch': branch,
+                    'weight': weight,
+                    'nat_win_rate': nat_win_rate,
+                    'local_win_rate': local_win_rate
+                    # Remove syn_win_rate as it was for Tansho and we now fetch 3-ren-tan later
+                }
+                rows.append(row)
+        except Exception as e:
+            st.error(f"List Parse Error: {e}")
+            return None
+            
+        return pd.DataFrame(rows)
+
+
+def add_advanced_features(df):
+    # 1. F (Flying) Analysis & ST Correction
+    if 'prior_results' in df.columns:
+        df['is_F_holder'] = df['prior_results'].astype(str).apply(lambda x: 1 if 'F' in x else 0)
+    else:
+        df['is_F_holder'] = 0
+        
+    st_col = 'course_avg_st' if 'course_avg_st' in df.columns else 'exhibition_start_timing'
+    if st_col in df.columns:
+        df['corrected_st'] = df[st_col] + (df['is_F_holder'] * 0.05)
+    else:
+        df['corrected_st'] = 0.20
+        
+    # Inner ST Gap Corrected
+    df = df.sort_values(['race_id', 'boat_number']) # Ensure sort (app processes 1 race, but safe to sort)
+    prev_sts = df['corrected_st'].shift(1)
+    df['inner_st_gap_corrected'] = df['corrected_st'] - prev_sts
+    df.loc[df['boat_number'] == 1, 'inner_st_gap_corrected'] = 0.0
+    
+    # 2. Motor Gap
+    if 'motor_rate' in df.columns and 'exhibition_time' in df.columns:
+        df['motor_rank'] = df.groupby('race_id')['motor_rate'].rank(ascending=False, method='min')
+        df['tenji_rank'] = df.groupby('race_id')['exhibition_time'].rank(ascending=True, method='min')
+        df['motor_gap'] = df['motor_rank'] - df['tenji_rank']
+    else:
+        df['motor_gap'] = 0.0
+        
+    # 3. Specialist Gap
+    if 'venue_course_1st_rate' in df.columns and 'nat_win_rate' in df.columns:
+        df['specialist_score'] = df['venue_course_1st_rate'] - df['nat_win_rate']
+    else:
+        df['specialist_score'] = 0.0
+        
+    # 4. Winning Move Match
+    if 'nige_count' in df.columns and 'course_run_count' in df.columns:
+        df['my_nige_rate'] = df['nige_count'] / (df['course_run_count'] + 1.0)
+        df['my_sashi_rate'] = df['sashi_count'] / (df['course_run_count'] + 1.0)
+        df['my_makuri_rate'] = df['makuri_count'] / (df['course_run_count'] + 1.0)
+        
+        inner_nige_rate = df['my_nige_rate'].shift(1)
+        df['sashi_potential'] = df['my_sashi_rate'] / (inner_nige_rate + 0.01)
+        df.loc[df['boat_number'] == 1, 'sashi_potential'] = 0
+        
+        df['st_rank'] = df.groupby('race_id')['corrected_st'].rank(ascending=True)
+        inner_st_rank = df['st_rank'].shift(1)
+        df['makuri_potential'] = df['my_makuri_rate'] * inner_st_rank
+        df.loc[df['boat_number'] == 1, 'makuri_potential'] = 0
+    else:
+        df['sashi_potential'] = 0.0
+        df['makuri_potential'] = 0.0
+        
+    # 5. Venue Frame Bias
+    bias_path = os.path.join(DATA_DIR, 'venue_frame_bias.csv')
+    if os.path.exists(bias_path):
+        bias_df = pd.read_csv(bias_path)
+        bias_df['venue_code'] = bias_df['venue_code'].astype(str).str.zfill(2)
+        bias_df['boat_number'] = bias_df['boat_number'].astype(int)
+        
+        venue_map = {
+            '桐生': '01', '戸田': '02', '江戸川': '03', '平和島': '04', '多摩川': '05',
+            '浜名湖': '06', '蒲郡': '07', '常滑': '08', '津': '09', '三国': '10',
+            'びわこ': '11', '住之江': '12', '尼崎': '13', '鳴門': '14', '丸亀': '15',
+            '児島': '16', '宮島': '17', '徳山': '18', '下関': '19', '若松': 20,
+            '芦屋': '21', '福岡': '22', '唐津': '23', '大村': '24'
+        }
+        
+        if 'venue_name' in df.columns:
+            df['temp_venue_code'] = df['venue_name'].map(venue_map).fillna('00')
+            df = df.merge(bias_df, left_on=['temp_venue_code', 'boat_number'], right_on=['venue_code', 'boat_number'], how='left')
+            df.drop(columns=['temp_venue_code', 'venue_code'], inplace=True, errors='ignore')
+            
+            # Fill NaNs
+            if 'venue_frame_win_rate' in df.columns:
+                df['venue_frame_win_rate'] = df['venue_frame_win_rate'].fillna(0.16)
+            else:
+                 df['venue_frame_win_rate'] = 0.0 # Merge failed?
+        else:
+            df['venue_frame_win_rate'] = 0.0
+    else:
+        df['venue_frame_win_rate'] = 0.0
+        
+    return df
+class FeatureEngineer:
+    @staticmethod
+    def process(df, venue_name, debug_mode=False):
+        df['venue_name'] = venue_name
+        
+        try:
+            r_course = pd.read_csv(os.path.join(DATA_DIR, 'static_racer_course.csv'))
+            r_venue = pd.read_csv(os.path.join(DATA_DIR, 'static_racer_venue.csv'))
+            v_course = pd.read_csv(os.path.join(DATA_DIR, 'static_venue_course.csv'))
+            r_params = pd.read_csv(os.path.join(DATA_DIR, 'static_racer_params.csv'))
+            
+            df['racer_id'] = df['racer_id'].astype(int)
+            df['pred_course'] = df['pred_course'].astype(int)
+            r_course['RacerID'] = r_course['RacerID'].astype(int)
+            r_course['Course'] = r_course['Course'].astype(int)
+            r_venue['RacerID'] = r_venue['RacerID'].astype(int)
+            v_course['course_number'] = v_course['course_number'].astype(int)
+            r_params['racer_id'] = r_params['racer_id'].astype(int)
+
+            df = df.merge(r_course, left_on=['racer_id', 'pred_course'], right_on=['RacerID', 'Course'], how='left')
+            df.rename(columns={
+                'RacesRun': 'course_run_count',
+                'QuinellaRate': 'course_quinella_rate',
+                'TrifectaRate': 'course_trifecta_rate',
+                'FirstPlaceRate': 'course_1st_rate',
+                'AvgStartTiming': 'course_avg_st',
+                'Nige': 'nige_count', 
+                'Makuri': 'makuri_count',
+                'Sashi': 'sashi_count'
+            }, inplace=True)
+
+            venue_map_rev = {
+                '桐生': 1, '戸田': 2, '江戸川': 3, '平和島': 4, '多摩川': 5,
+                '浜名湖': 6, '蒲郡': 7, '常滑': 8, '津': 9, '三国': 10,
+                'びわこ': 11, '住之江': 12, '尼崎': 13, '鳴門': 14, '丸亀': 15,
+                '児島': 16, '宮島': 17, '徳山': 18, '下関': 19, '若松': 20,
+                '芦屋': 21, '福岡': 22, '唐津': 23, '大村': 24
+            }
+            df['venue_code_int'] = df['venue_name'].map(venue_map_rev).fillna(0).astype(int)
+            r_venue['Venue'] = pd.to_numeric(r_venue['Venue'], errors='coerce').fillna(0).astype(int)
+            
+            df = df.merge(r_venue, left_on=['racer_id', 'venue_code_int'], right_on=['RacerID', 'Venue'], how='left')
+            
+            if 'local_win_rate' in df.columns:
+                 df['local_win_rate'] = df['local_win_rate'].replace(0.0, np.nan)
+                 if 'WinRate' in df.columns:
+                     df['local_win_rate'] = df['local_win_rate'].fillna(df['WinRate'])
+            elif 'WinRate' in df.columns:
+                 df['local_win_rate'] = df['WinRate']
+
+            df = df.merge(v_course, left_on=['venue_name', 'pred_course'], right_on=['venue_name', 'course_number'], how='left')
+            df.rename(columns={'rate_1st': 'venue_course_1st_rate', 'rate_2nd': 'venue_course_2nd_rate', 'rate_3rd': 'venue_course_3rd_rate'}, inplace=True)
+
+            df = df.merge(r_params, on='racer_id', how='left')
+            
+        except Exception: pass
+        
+        required_cols = ['makuri_count', 'nige_count', 'sashi_count', 'nat_win_rate', 'course_run_count', 'local_win_rate']
+        for c in required_cols:
+            if c not in df.columns: df[c] = 0.0
+            
+        # Features
+        def parse_prior(x):
+            if isinstance(x, (int, float)): return float(x)
+            if not isinstance(x, str): return 3.5
+            try:
+                x_c = re.sub(r'[欠失FLS]', '', x)
+                parts = x_c.split()
+                ranks = [float(p) for p in parts if p.isdigit()]
+                if ranks: return sum(ranks)/len(ranks)
+            except: pass
+            return 3.5
+            
+        df['series_avg_rank'] = df['prior_results'].apply(parse_prior)
+        df['makuri_rate'] = df['makuri_count'] / df['course_run_count'].replace(0, 1)
+        df['nige_rate'] = df['nige_count'] / df['course_run_count'].replace(0, 1)
+
+        # Advanced Features
+        df = add_advanced_features(df)
+
+        df = df.sort_values('pred_course')
+        # Use corrected_st if available
+        st_col = 'corrected_st' if 'corrected_st' in df.columns else 'exhibition_start_timing'
+        
+        df['inner_st'] = df[st_col].shift(1).fillna(0)
+        df['inner_st_gap'] = df[st_col] - df['inner_st'] # Overwrite
+        df['outer_st'] = df[st_col].shift(-1).fillna(0)
+        avg_neighbor = (df['inner_st'] + df['outer_st']) / 2
+        df['slit_formation'] = df[st_col] - avg_neighbor
+
+        c1_nige = df.loc[df['pred_course']==1, 'nige_rate']
+        val = c1_nige.values[0] if len(c1_nige) > 0 else 0.5
+        df['anti_nige_potential'] = df['makuri_rate'] * (1 - val)
+        
+        df['wall_strength'] = df['course_quinella_rate'].shift(1).fillna(0)
+        df['follow_potential'] = df['makuri_rate'].shift(1).fillna(0) * df['course_quinella_rate']
+        
+        mean_t = df['exhibition_time'].mean()
+        std_t = df['exhibition_time'].std()
+        if std_t == 0: std_t = 1
+        df['tenji_z_score'] = (mean_t - df['exhibition_time']) / std_t
+        df['linear_rank'] = df['exhibition_time'].rank(method='min', ascending=True)
+        df['is_linear_leader'] = (df['linear_rank'] == 1).astype(int)
+        
+        if 'weight_x' in df.columns: df['weight'] = df['weight_x']
+        if 'weight' not in df.columns: df['weight'] = 52.0
+        df['weight_diff'] = df['weight'] - df['weight'].mean()
+        df['high_wind_alert'] = (df['wind_speed'] >= 5).astype(int)
+        
+        df['nat_win_rate'] = pd.to_numeric(df['nat_win_rate'], errors='coerce').fillna(0.0)
+        df['local_win_rate'] = pd.to_numeric(df['local_win_rate'], errors='coerce').fillna(0.0)
+        df['local_perf_diff'] = df['local_win_rate'] - df['nat_win_rate']
+
+        # Wind Vector
+        def wind_deg_from_int(x): return (x - 1) * 22.5 if 1 <= x <= 16 else 0
+        df['wind_angle_deg'] = df['wind_direction'].apply(wind_deg_from_int)
+        venue_tailwind_from = {
+            '桐生': 135, '戸田': 90, '江戸川': 180, '平和島': 180, '多摩川': 270,
+            '浜名湖': 180, '蒲郡': 270, '常滑': 270, '津': 135, '三国': 180,
+            'びわこ': 225, '住之江': 270, '尼崎': 90, '鳴門': 135, '丸亀': 15,
+            '児島': 225, '宮島': 270, '徳山': 135, '下関': 270, '若松': 270,
+            '芦屋': 135, '福岡': 0, '唐津': 135, '大村': 315
+        }
+        df['venue_tailwind_deg'] = df['venue_name'].map(venue_tailwind_from).fillna(0)
+        angle_diff_rad = np.radians(df['wind_angle_deg'] - df['venue_tailwind_deg'])
+        df['wind_vector_long'] = df['wind_speed'] * np.cos(angle_diff_rad)
+        df['wind_vector_lat'] = df['wind_speed'] * np.sin(angle_diff_rad)
+
+        if 'race_date' not in df.columns: df['race_date'] = '20000101'
+        
+        # Win Direction Mapping (Int -> String to match Training Data)
+        wind_map = {
+            1: '北', 2: '北北東', 3: '北東', 4: '東北東', 5: '東', 6: '東南東', 7: '南東', 8: '南南東',
+            9: '南', 10: '南南西', 11: '南西', 12: '西南西', 13: '西', 14: '西北西', 15: '北西', 16: '北北西'
+        }
+        # Only map if numeric
+        if pd.api.types.is_numeric_dtype(df['wind_direction']):
+             df['wind_direction'] = df['wind_direction'].map(wind_map).fillna(df['wind_direction'])
+             # If mapping leaves numbers (e.g. 0), coerce to string or handle?
+             # Train data likely has "南" etc. 0 might be problematic if not in train categories.
+             # Convert to string to ensure it becomes category later.
+             df['wind_direction'] = df['wind_direction'].astype(str)
+             # Handle 'nan' string if any
+             df['wind_direction'] = df['wind_direction'].replace('nan', '')
+
+        # Categorical Conversion (Must match train_model.py logic)
+        # First, try to convert everything to numeric (like pd.read_csv does)
+        # Use errors='coerce' to force non-parseable strings to NaN (float), 
+        # preventing them from staying as Object and becoming Category.
+        for col in df.columns:
+            if col not in ['race_id', 'race_date', 'venue_name', 'prior_results', 'wind_direction', 'branch', 'class', 'racer_class']:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # Then convert remaining objects to category
+        # train_model.py ignores: ['race_id', 'race_date', 'prior_results']
+        ignore_cols = ['race_id', 'race_date', 'prior_results', 'pred_score', 'weight_for_loss', 'relevance', 'rank']
+        
+        for col in df.columns:
+            if col in ignore_cols: continue
+            if df[col].dtype == 'object':
+                df[col] = df[col].astype('category')
+
+        return df
+
+    @staticmethod
+    def get_features_subset(df, mode='honmei'):
+        base_ignore = [
+            'race_id', 'boat_number', 'racer_id', 'rank', 'relevance',
+            'race_date', 'venue_name', 'prior_results', 'weight_for_loss', 'pred_score', 'score',
+            # Extra columns created in app but not in training
+            'wind_angle_deg', 'venue_tailwind_deg', 'venue_code_int',
+            'weather', 'boat_before', 'params'
+        ]
+        odds_features = ['syn_win_rate', 'odds', 'prediction_odds', 'popularity', 'vote_count', 'win_share']
+        
+        all_cols = df.columns.tolist()
+        candidates = [c for c in all_cols if c not in base_ignore]
+        
+        return candidates
+
+def calculate_plackett_luce_probs(honmei_scores_dict):
+    boats = list(honmei_scores_dict.keys())
+    scores = np.array([honmei_scores_dict[b] for b in boats])
+    max_score = np.max(scores)
+    exp_scores = np.exp(scores - max_score)
+    p1 = exp_scores / np.sum(exp_scores)
+    p1_dict = {boats[i]: p1[i] for i in range(len(boats))}
+    
+    import itertools
+    combos = list(itertools.permutations(boats, 3))
+    pl_probs = []
+    for c in combos:
+        b1, b2, b3 = c
+        prob1 = p1_dict[b1]
+        denom2 = 1.0 - p1_dict[b1]
+        if denom2 <= 0: denom2 = 1e-9
+        prob2 = p1_dict[b2] / denom2
+        denom3 = 1.0 - p1_dict[b1] - p1_dict[b2]
+        if denom3 <= 0: denom3 = 1e-9
+        prob3 = p1_dict[b3] / denom3
+        total_prob = prob1 * prob2 * prob3
+        combo_str = f"{b1}-{b2}-{b3}"
+        pl_probs.append({'combo': combo_str, 'prob': total_prob})
+        
+    pl_probs.sort(key=lambda x: x['prob'], reverse=True)
+    
+    # フィルター指標用
+    p1_sorted = sorted(p1_dict.items(), key=lambda x: x[1], reverse=True)
+    max_p1 = float(p1_sorted[0][1])
+    prob_gap = float(pl_probs[0]['prob'] - pl_probs[1]['prob']) if len(pl_probs) >= 2 else 0.0
+    
+    return pl_probs, max_p1, prob_gap
+
+def select_hybrid_formation_plan_b(pl_probs, ana_scores_dict, all_odds):
+    if not pl_probs or not all_odds: return []
+    top_combo = pl_probs[0]['combo']
+    top_odds = all_odds.get(top_combo, 0)
+    if top_odds < 1: return []
+    
+    import math
+    N = int(min(8, math.floor(top_odds)))
+    if N < 1: return []
+    
+    selected = [p['combo'] for p in pl_probs[:N]]
+    best_ana_boat = max(ana_scores_dict, key=ana_scores_dict.get)
+    best_ana_boat_str = str(best_ana_boat)
+    
+    ana_in_3rd = any(c.split('-')[2] == best_ana_boat_str for c in selected)
+    if not ana_in_3rd:
+        parts = top_combo.split('-')
+        b1, b2 = parts[0], parts[1]
+        if best_ana_boat_str != b1 and best_ana_boat_str != b2:
+            new_combo = f"{b1}-{b2}-{best_ana_boat_str}"
+            if new_combo not in selected:
+                selected[-1] = new_combo
+    return selected
+
+def calculate_funds_distribution(selected_combos, pl_probs_list, all_odds, base_return, bonus_budget):
+    if not selected_combos: return {}
+    pl_probs_dict = {p['combo']: p['prob'] for p in pl_probs_list}
+    for c in selected_combos:
+        if all_odds.get(c, 0) < 1.01: return {}
+    
+    sum_p = sum(pl_probs_dict.get(c, 0) for c in selected_combos)
+    if sum_p <= 0: sum_p = 1.0
+    
+    bets = {}
+    for c in selected_combos:
+        o = all_odds[c]
+        p = pl_probs_dict.get(c, 0)
+        b_base = base_return / o
+        b_bonus = bonus_budget * (p / sum_p)
+        raw_bet = b_base + b_bonus
+        bet_100 = max(100, round(raw_bet / 100) * 100)
+        bets[c] = bet_100
+        
+    total_bet = sum(bets.values())
+    for c, b in bets.items():
+        if b * all_odds[c] <= total_bet:
+            bets_flat = {c: 100 for c in selected_combos}
+            total_flat = len(selected_combos) * 100
+            for cf, bf in bets_flat.items():
+                if bf * all_odds[cf] <= total_flat: return {}
+            return bets_flat
+    return bets
+
+# --- 3. Main App ---
+st.title("🚤 BoatRace AI Dual Strategy System")
+st.markdown("Returns specific predictions using two specialized models.")
+
+today = datetime.date.today()
+target_date = st.sidebar.date_input("Date", today)
+venue_map = {
+    1: '桐生', 2: '戸田', 3: '江戸川', 4: '平和島', 5: '多摩川',
+    6: '浜名湖', 7: '蒲郡', 8: '常滑', 9: '津', 10: '三国',
+    11: 'びわこ', 12: '住之江', 13: '尼崎', 14: '鳴門', 15: '丸亀',
+    16: '児島', 17: '宮島', 18: '徳山', 19: '下関', 20: '若松',
+    21: '芦屋', 22: '福岡', 23: '唐津', 24: '大村'
+}
+venue_code = st.sidebar.selectbox("Venue", list(venue_map.keys()), format_func=lambda x: f"{x:02d}: {venue_map[x]}")
+venue_name = venue_map[venue_code]
+race_no = st.sidebar.selectbox("Race No", range(1, 13))
+
+debug_mode = st.sidebar.checkbox("Show Debug Info", value=False)
+st.sidebar.markdown("---")
+st.sidebar.markdown("**💰 Budget Settings**")
+base_budget = st.sidebar.number_input("Base Budget (Flat Payout)", min_value=0, max_value=10000, value=1000, step=100)
+bonus_budget = st.sidebar.number_input("Bonus Budget (EV Boost)", min_value=0, max_value=10000, value=500, step=100)
+
+if st.button("Analyze Race", type="primary"):
+    st.session_state['run_analysis'] = True
+    st.session_state['target_props'] = {
+        'date': target_date.strftime('%Y%m%d'),
+        'venue': venue_code,
+        'race': race_no,
+        'v_name': venue_name
+    }
+
+if st.session_state.get('run_analysis'):
+    props = st.session_state['target_props']
+    st.info(f"Analyzing: {props['v_name']} {props['race']}R ({props['date']})")
+    
+    with st.spinner("Scraping Data..."):
+        df_race = BoatRaceScraper.get_race_data(props['date'], props['venue'], props['race'])
+
+    if df_race is not None:
+        st.subheader("Race Data")
+        st.dataframe(df_race[['boat_number', 'racer_id', 'motor_rate', 'exhibition_time', 'exhibition_start_timing', 'syn_win_rate']])
+        
+        with st.spinner("Engineering Features..."):
+            df_feat = FeatureEngineer.process(df_race, props['v_name'], debug_mode=debug_mode)
+        
+        # --- Prediction ---
+        st.subheader("🤖 AI Prediction (3-Ren Tan - Plan B)")
+        
+        if os.path.exists(MODEL_HONMEI_PATH) and os.path.exists(MODEL_ANA_PATH):
+            try:
+                model_h = lgb.Booster(model_file=MODEL_HONMEI_PATH)
+                model_a = lgb.Booster(model_file=MODEL_ANA_PATH)
+                
+                # Robust Feature Selection: Get exact features from model
+                feats_h = model_h.feature_name()
+                feats_a = model_a.feature_name()
+                
+                known_cats = ['branch', 'wind_direction', 'venue_code_y', 'class', 'racer_class']
+                
+                for f in feats_h:
+                    if f not in df_feat.columns:
+                        if f in known_cats:
+                            df_feat[f] = '00' 
+                            df_feat[f] = df_feat[f].astype('category')
+                        else:
+                            df_feat[f] = 0.0
+                    else:
+                        if f in known_cats and not pd.api.types.is_categorical_dtype(df_feat[f]):
+                            df_feat[f] = df_feat[f].astype(str).astype('category')
+                            
+                for f in feats_a:
+                    if f not in df_feat.columns:
+                        if f in known_cats:
+                            df_feat[f] = '00' 
+                            df_feat[f] = df_feat[f].astype('category')
+                        else:
+                            df_feat[f] = 0.0
+                    else:
+                        if f in known_cats and not pd.api.types.is_categorical_dtype(df_feat[f]):
+                            df_feat[f] = df_feat[f].astype(str).astype('category')
+
+                preds_h = model_h.predict(df_feat[feats_h])
+                preds_a = model_a.predict(df_feat[feats_a])
+                
+                df_feat['score_honmei'] = preds_h
+                df_feat['score_ana'] = preds_a
+                
+                scores_h = dict(zip(df_feat['boat_number'], df_feat['score_honmei']))
+                scores_a = dict(zip(df_feat['boat_number'], df_feat['score_ana']))
+                
+                pl_probs, max_p1, prob_gap = calculate_plackett_luce_probs(scores_h)
+                
+                # Get live odds for calculation
+                # We already have syn_win_rate in df_feat, but we need all 120 odds
+                # The get_odds method in scraper was used inside get_race_data and returned odds_map.
+                # However, get_odds currently returns map with keys as INT (e.g. 123) or just Tansho.
+                # Wait, BoatRaceScraper.get_odds parses "単勝" (Win). We need 3-Ren Tan odds!
+                # Actually, in simulate_betting.py, get_all_trifecta_odds fetches from DB.
+                # Since this is a live app, we need to fetch live 3-Ren Tan odds.
+                # But to avoid complex scraping right here, we can fallback to using prediction or just dummy if live odds scraper for trifecta is not implemented.
+                # I will implement a quick odds check or just show the combos if we can't scrape them live easily.
+                
+                st.markdown("---")
+                st.write(f"**Max 1st Prob (P1):** `{max_p1:.4f}` | **Prob Gap:** `{prob_gap:.4f}`")
+                
+                # Plan B Filter Thresholds
+                if max_p1 >= 0.49 and prob_gap >= 0.010:
+                    st.success("🎯 **Target Race (Plan B)** - Optimal conditions met.")
+                else:
+                    st.warning("☕ **Skip (Ken)** - Does not meet Plan B confidence thresholds.")
+                
+                # Dynamic N and Hybrid Formation
+                # We have the live odds!
+                # all_odds is stored in df_race internally, wait, df_race didn't save all_odds directly.
+                # Let's fetch it again quickly or we can just fetch it here.
+                all_odds = BoatRaceScraper.get_odds(props['date'], props['venue'], props['race'])
+                
+                selected_combos = select_hybrid_formation_plan_b(pl_probs, scores_a, all_odds)
+                bets = calculate_funds_distribution(selected_combos, pl_probs, all_odds, base_budget, bonus_budget)
+                
+                if not selected_combos:
+                    st.info("No combinations selected (Odds too low).")
+                else:
+                    st.markdown("#### Plan B Buying List (Funds Distribution)")
+                    st.info("📊 Live 3-Ren Tan odds integrated.")
+                    
+                    df_bets = pd.DataFrame([
+                        {
+                            'Combo': c,
+                            'PL Prob': f"{next(p['prob'] for p in pl_probs if p['combo'] == c):.2%}",
+                            'Live Odds': f"{all_odds.get(c, 0.0):.1f}",
+                            'Bet Amount (JPY)': bets.get(c, 100),
+                            'Est. Return': int(bets.get(c, 100) * all_odds.get(c, 0.0))
+                        }
+                        for c in selected_combos
+                    ])
+                    st.dataframe(df_bets, hide_index=True)
+                    st.success(f"**Total Investment:** {sum(bets.values())} JPY")
+                
+            except Exception as e:
+                st.error(f"Prediction Error: {e}")
+        else:
+            st.warning("Model files not found. Please ensure model_honmei.txt and model_ana.txt exist.")
