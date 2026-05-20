@@ -190,7 +190,7 @@ class FeatureEngineer:
             
         except Exception: pass
         
-        required_cols = ['makuri_count', 'nige_count', 'sashi_count', 'nat_win_rate', 'course_run_count', 'local_win_rate']
+        required_cols = ['makuri_count', 'nige_count', 'sashi_count', 'nat_win_rate', 'course_run_count', 'local_win_rate', 'course_quinella_rate']
         for c in required_cols:
             if c not in df.columns: df[c] = 0.0
             
