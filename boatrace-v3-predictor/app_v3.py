@@ -418,7 +418,7 @@ def main():
     
     # Sidebar
     st.sidebar.header("💰 Investment Config")
-    strategy_mode = st.sidebar.radio("Strategy Mode", ["Plan A (全レース参戦)", "Plan B (厳選フィルター)"])
+
     base_budget = st.sidebar.number_input("Base Budget (Flat Payout)", min_value=0, max_value=10000, value=1000, step=100)
     bonus_budget = st.sidebar.number_input("Bonus Budget (EV Boost)", min_value=0, max_value=10000, value=500, step=100)
     
@@ -524,19 +524,37 @@ def main():
             
             pl_probs, max_p1, prob_gap = calculate_plackett_luce_probs(scores_h)
             
-            st.subheader("📊 Race Inference Analytics")
-            st.write(f"**Max 1st Prob (P1):** `{max_p1:.4f}` | **Prob Gap:** `{prob_gap:.4f}`")
+            st.subheader("📊 Race Inference Analytics (参戦／見 判定)")
             
-            # 運用モードの切り替え
-            if strategy_mode == "Plan A (全レース参戦)":
-                st.success("🔥 **Target Race (Plan A)** - 積極参戦モード（全レース購入）で推奨買い目を生成します。")
+            p1_target = 0.49
+            gap_target = 0.010
+            
+            p1_diff = max_p1 - p1_target
+            gap_diff = prob_gap - gap_target
+            
+            p1_pass_ratio = min(1.0, max_p1 / p1_target)
+            gap_pass_ratio = min(1.0, prob_gap / gap_target)
+            skip_rec_deg = (1.0 - (p1_pass_ratio + gap_pass_ratio) / 2.0) * 100
+            
+            if skip_rec_deg == 0:
+                deg_str = "🔵 **0% (条件クリア！参戦推奨)**"
+            elif skip_rec_deg < 15:
+                deg_str = f"🟡 **{skip_rec_deg:.1f}% (やや波乱含み・見推奨度：低)**"
+            elif skip_rec_deg < 30:
+                deg_str = f"🟠 **{skip_rec_deg:.1f}% (リスクあり・見推奨度：中)**"
+            elif skip_rec_deg < 50:
+                deg_str = f"🔴 **{skip_rec_deg:.1f}% (リスク高め・見推奨度：高)**"
             else:
-                # Plan B Filter Thresholds
-                is_target_race = (max_p1 >= 0.49 and prob_gap >= 0.010)
-                if is_target_race:
-                    st.success("🎯 **Target Race (Plan B)** - Optimal conditions met. Recommended to Bet!")
-                else:
-                    st.warning("☕ **Skip (Ken)** - Does not meet Plan B confidence thresholds. Recommend watching only.")
+                deg_str = f"☠️ **{skip_rec_deg:.1f}% (危険レース・完全見推奨)**"
+
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown(f"**Max 1st Prob (P1)**\n- 実測値: `{max_p1:.4f}`\n- 基準値: `{p1_target:.4f}`\n- 差異: `{p1_diff:+.4f}`")
+            with col2:
+                st.markdown(f"**Prob Gap**\n- 実測値: `{prob_gap:.4f}`\n- 基準値: `{gap_target:.4f}`\n- 差異: `{gap_diff:+.4f}`")
+            
+            st.markdown(f"### ☕ 見（ケン）推奨度: {deg_str}")
+
 
             
             selected_combos = select_hybrid_formation_plan_b(pl_probs, scores_a, all_odds)
@@ -546,7 +564,8 @@ def main():
             if not selected_combos:
                 st.info("No combinations selected (Odds too low or no options meet constraints).")
             else:
-                st.markdown("### 🎯 Recommended Buying List (Plan B)")
+                st.markdown("### 🎯 Recommended Buying List")
+
                 
                 # フォーメーション表示の追加
                 formation_str = format_formations(selected_combos)
