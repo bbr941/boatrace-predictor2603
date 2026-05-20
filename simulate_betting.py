@@ -13,8 +13,10 @@ MODEL_ANA_PATH = 'model_ana.txt'
 DATA_PATH = 'boatrace_dataset_labeled_v2.csv'
 DB_PATH = r'D:\BOAT2504_Base_line\BOAT2504_DB\boatrace.db'
 
-# プランB（購入率50%制限・厳格なレースフィルター）を有効にする
-USE_PLAN_B = True 
+# ==========================================
+# 運用モード設定
+# ==========================================
+USE_PLAN_B = False  # False: Plan A (全レース参戦), True: Plan B (厳選フィルター)
 
 def get_db_connection():
     return sqlite3.connect(DB_PATH)
@@ -149,7 +151,7 @@ def run_simulation():
     print("Fetching valid Race IDs from DB...")
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT DISTINCT race_id FROM odds_data ORDER BY race_id DESC LIMIT 5000")
+    cursor.execute("SELECT DISTINCT race_id FROM odds_data ORDER BY race_id DESC LIMIT 10")
     valid_races = [row[0] for row in cursor.fetchall()]
     
     test_df = df[df['race_id'].isin(valid_races)].copy()

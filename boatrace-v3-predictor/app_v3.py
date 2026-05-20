@@ -418,6 +418,7 @@ def main():
     
     # Sidebar
     st.sidebar.header("💰 Investment Config")
+    strategy_mode = st.sidebar.radio("Strategy Mode", ["Plan A (全レース参戦)", "Plan B (厳選フィルター)"])
     base_budget = st.sidebar.number_input("Base Budget (Flat Payout)", min_value=0, max_value=10000, value=1000, step=100)
     bonus_budget = st.sidebar.number_input("Bonus Budget (EV Boost)", min_value=0, max_value=10000, value=500, step=100)
     
@@ -526,12 +527,17 @@ def main():
             st.subheader("📊 Race Inference Analytics")
             st.write(f"**Max 1st Prob (P1):** `{max_p1:.4f}` | **Prob Gap:** `{prob_gap:.4f}`")
             
-            # Plan B Filter Thresholds
-            is_target_race = (max_p1 >= 0.49 and prob_gap >= 0.010)
-            if is_target_race:
-                st.success("🎯 **Target Race (Plan B)** - Optimal conditions met. Recommended to Bet!")
+            # 運用モードの切り替え
+            if strategy_mode == "Plan A (全レース参戦)":
+                st.success("🔥 **Target Race (Plan A)** - 積極参戦モード（全レース購入）で推奨買い目を生成します。")
             else:
-                st.warning("☕ **Skip (Ken)** - Does not meet Plan B confidence thresholds. Recommend watching only.")
+                # Plan B Filter Thresholds
+                is_target_race = (max_p1 >= 0.49 and prob_gap >= 0.010)
+                if is_target_race:
+                    st.success("🎯 **Target Race (Plan B)** - Optimal conditions met. Recommended to Bet!")
+                else:
+                    st.warning("☕ **Skip (Ken)** - Does not meet Plan B confidence thresholds. Recommend watching only.")
+
             
             selected_combos = select_hybrid_formation_plan_b(pl_probs, scores_a, all_odds)
             bets = calculate_funds_distribution(selected_combos, pl_probs, all_odds, base_budget, bonus_budget)
