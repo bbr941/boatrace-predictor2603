@@ -1,0 +1,69 @@
+Loading base data...
+Loading base data... (ALL)
+Calculating ST Standard Deviation from results...
+Calculating Synthetic Odds...
+Processing Features...
+Processing Wind Vectors...
+Wind processing complete.
+Data creation complete.
+                race_id  boat_number  ...  tenji_z_score  series_avg_rank
+6914748   01_20050102_1            1  ...            0.0              3.5
+6914749   01_20050102_1            2  ...            0.0              3.5
+6914750   01_20050102_1            3  ...            0.0              3.5
+6914751   01_20050102_1            4  ...            0.0              3.5
+6914752   01_20050102_1            5  ...            0.0              3.5
+6914753   01_20050102_1            6  ...            0.0              3.5
+6914742  01_20050102_10            1  ...            0.0              3.5
+6914743  01_20050102_10            2  ...            0.0              3.5
+6914744  01_20050102_10            3  ...            0.0              3.5
+6914745  01_20050102_10            4  ...            0.0              3.5
+6914746  01_20050102_10            5  ...            0.0              3.5
+6914747  01_20050102_10            6  ...            0.0              3.5
+
+[12 rows x 5 columns]
+D:\BOAT2512_AntiGravity_2_ana\train_model.py:313: SettingWithCopyWarning: 
+A value is trying to be set on a copy of a slice from a DataFrame.
+Try using .loc[row_indexer,col_indexer] = value instead
+
+See the caveats in the documentation: https://pandas.pydata.org/pandas-docs/stable/user_guide/indexing.html#returning-a-view-versus-a-copy
+  df['pred_score'] = model.predict(df[features])
+D:\BOAT2512_AntiGravity_2_ana\train_model.py:316: DeprecationWarning: DataFrameGroupBy.apply operated on the grouping columns. This behavior is deprecated, and in a future version of pandas the grouping columns will be excluded from the operation. Either pass `include_groups=False` to exclude the groupings or explicitly select the grouping columns after groupby to silence this warning.
+  predictions = df.groupby('race_id').apply(
+D:\BOAT2512_AntiGravity_2_ana\train_model.py:319: DeprecationWarning: DataFrameGroupBy.apply operated on the grouping columns. This behavior is deprecated, and in a future version of pandas the grouping columns will be excluded from the operation. Either pass `include_groups=False` to exclude the groupings or explicitly select the grouping columns after groupby to silence this warning.
+  actuals = df.groupby('race_id').apply(
+D:\BOAT2512_AntiGravity_2_ana\train_model.py:313: SettingWithCopyWarning: 
+A value is trying to be set on a copy of a slice from a DataFrame.
+Try using .loc[row_indexer,col_indexer] = value instead
+
+See the caveats in the documentation: https://pandas.pydata.org/pandas-docs/stable/user_guide/indexing.html#returning-a-view-versus-a-copy
+  df['pred_score'] = model.predict(df[features])
+D:\BOAT2512_AntiGravity_2_ana\train_model.py:316: DeprecationWarning: DataFrameGroupBy.apply operated on the grouping columns. This behavior is deprecated, and in a future version of pandas the grouping columns will be excluded from the operation. Either pass `include_groups=False` to exclude the groupings or explicitly select the grouping columns after groupby to silence this warning.
+  predictions = df.groupby('race_id').apply(
+D:\BOAT2512_AntiGravity_2_ana\train_model.py:319: DeprecationWarning: DataFrameGroupBy.apply operated on the grouping columns. This behavior is deprecated, and in a future version of pandas the grouping columns will be excluded from the operation. Either pass `include_groups=False` to exclude the groupings or explicitly select the grouping columns after groupby to silence this warning.
+  actuals = df.groupby('race_id').apply(
+Preprocessing...
+  - Adding Advanced Features (Market Distortion)...
+
+Training Model: model_honmei.txt | Features: 36
+Training until validation scores don't improve for 50 rounds
+[100]	training's ndcg@1: 0.543068	training's ndcg@2: 0.647184	training's ndcg@3: 0.714947	valid_1's ndcg@1: 0.583726	valid_1's ndcg@2: 0.679508	valid_1's ndcg@3: 0.74192
+[200]	training's ndcg@1: 0.547253	training's ndcg@2: 0.650829	training's ndcg@3: 0.718133	valid_1's ndcg@1: 0.584721	valid_1's ndcg@2: 0.680879	valid_1's ndcg@3: 0.743169
+[300]	training's ndcg@1: 0.550051	training's ndcg@2: 0.653263	training's ndcg@3: 0.720212	valid_1's ndcg@1: 0.585209	valid_1's ndcg@2: 0.681491	valid_1's ndcg@3: 0.743598
+Early stopping, best iteration is:
+[299]	training's ndcg@1: 0.550029	training's ndcg@2: 0.653233	training's ndcg@3: 0.720203	valid_1's ndcg@1: 0.585251	valid_1's ndcg@2: 0.681536	valid_1's ndcg@3: 0.743645
+Evaluating Honmei...
+[Honmei] Trifecta Accuracy: 8.75% (20174/230492)
+
+--- Configuring Ana Model (High Dividend Special) ---
+  - Cheap Wins (Odds<10) masked to 0: 1107069 rows
+  - High Dividend Wins (Odds>=10) set to Odds: 33483 rows
+  - Ana Features: 37 features (Odds excluded)
+
+Training Model: model_ana.txt | Features: 37
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[2]	training's ndcg@1: 1	training's ndcg@2: 1	training's ndcg@3: 1	valid_1's ndcg@1: 1	valid_1's ndcg@2: 1	valid_1's ndcg@3: 1
+Evaluating Ana...
+[Ana] Trifecta Accuracy: 3.84% (8853/230492)
+
+All Done.
