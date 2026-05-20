@@ -373,6 +373,45 @@ def get_race_selection():
     race_no = st.sidebar.slider("Race No", 1, 12, 1)
     return date, venue, race_no
 
+def format_formations(combos):
+    if not combos: return ""
+    parsed = [tuple(c.split('-')) for c in combos]
+    by_1st = {}
+    for c in parsed:
+        by_1st.setdefault(c[0], []).append(c)
+        
+    formations = []
+    for f1, items in by_1st.items():
+        set_2nd = set(item[1] for item in items)
+        set_3rd = set(item[2] for item in items)
+        
+        cross = []
+        for b2 in set_2nd:
+            for b3 in set_3rd:
+                if f1 != b2 and f1 != b3 and b2 != b3:
+                    cross.append((f1, b2, b3))
+                    
+        if set(cross) == set(items):
+            f2_str = "".join(sorted(list(set_2nd)))
+            f3_str = "".join(sorted(list(set_3rd)))
+            formations.append(f"{f1}-{f2_str}-{f3_str}")
+        else:
+            by_2nd = {}
+            for item in items:
+                by_2nd.setdefault(item[1], []).append(item[2])
+            
+            by_3rd_set = {}
+            for f2, f3_list in by_2nd.items():
+                f3_tuple = tuple(sorted(list(set(f3_list))))
+                by_3rd_set.setdefault(f3_tuple, []).append(f2)
+                
+            for f3_tuple, f2_list in by_3rd_set.items():
+                f2_str = "".join(sorted(f2_list))
+                f3_str = "".join(f3_tuple)
+                formations.append(f"{f1}-{f2_str}-{f3_str}")
+                
+    return " / ".join(formations)
+
 def main():
     st.title("🚤 BoatRace AI V3.1+ (Plan B Investment Strategy Engine)")
     st.markdown("本命・穴デュアルモデルを用いた確率＆オッズ連動型自動投資・資金分配エンジン")
@@ -502,6 +541,10 @@ def main():
                 st.info("No combinations selected (Odds too low or no options meet constraints).")
             else:
                 st.markdown("### 🎯 Recommended Buying List (Plan B)")
+                
+                # フォーメーション表示の追加
+                formation_str = format_formations(selected_combos)
+                st.success(f"**【推奨フォーメーション】** {formation_str}")
                 
                 df_bets = pd.DataFrame([
                     {
