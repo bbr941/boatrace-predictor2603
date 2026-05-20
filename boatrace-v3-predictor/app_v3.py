@@ -1,322 +1,55 @@
 import os
-# Force single thread to prevent Streamlit Cloud crashes (OpenMP)
-os.environ['OMP_NUM_THREADS'] = '1'
-
-import streamlit as st
-import pandas as pd
-import numpy as np
-import lightgbm as lgb
-import requests
-from bs4 import BeautifulSoup
-import datetime
-import re
-import time
 import sys
+import datetime
 import itertools
+import asyncio
+import logging
+import traceback
+import time
+import math
+import numpy as np
+import pandas as pd
+import lightgbm as lgb
+import streamlit as st
 
-# --- Configuration & Paths ---
-st.set_page_config(page_title="BoatRace AI - Plan B Strategy", layout="wide")
+# --- Path Adjustment (Must be at the very top) ---
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:
+    sys.path.append(ROOT_DIR)
+
+from data_fetcher import get_realtime_data
+import config
+
+# Logger setup
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# --- Configuration ---
+st.set_page_config(page_title="BoatRace AI V3.1+ - Plan B Strategy", layout="wide")
+
 MODEL_HONMEI_PATH = os.path.join(ROOT_DIR, 'model_honmei.txt')
 MODEL_ANA_PATH = os.path.join(ROOT_DIR, 'model_ana.txt')
 DATA_DIR = os.path.join(ROOT_DIR, 'app_data')
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-}
 
-if st.sidebar.button("Clear Cache"):
-    st.cache_data.clear()
-    st.success("Cache Cleared!")
+# Windows用非同期パッチ
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-# --- 1. Scraper Class ---
-class BoatRaceScraper:
-    @staticmethod
-    def get_soup(url):
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                resp = requests.get(url, headers=HEADERS, timeout=15)
-                resp.raise_for_status()
-                resp.encoding = resp.apparent_encoding
-                return BeautifulSoup(resp.text, 'html.parser')
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    st.error(f"Data Fetch Error: {e}")
-                    return None
-                time.sleep(1)
+@st.cache_resource
+def load_models():
+    """学習済み本命・穴モデルをロードする（キャッシュ化）"""
+    if not os.path.exists(MODEL_HONMEI_PATH) or not os.path.exists(MODEL_ANA_PATH):
+        st.error(f"Models not found in ROOT: {ROOT_DIR}")
         return None
-
-    @staticmethod
-    def parse_float(text):
-        try:
-            return float(re.search(r'([\d\.]+)', text).group(1))
-        except:
-            return 0.0
-
-    @staticmethod
-    def get_odds(date_str, venue_code, race_no):
-        jcd = f"{int(venue_code):02d}"
-        url = f"https://www.boatrace.jp/owpc/pc/race/oddstf?rno={race_no}&jcd={jcd}&hd={date_str}"
-        soup = BoatRaceScraper.get_soup(url)
-        odds_data = {}
-        if soup:
-            try:
-                target_tbody = soup.select_one("tbody.is-p3-0")
-                if not target_tbody:
-                    target_tbody = soup.select_one("div.table1 table tbody")
-                if not target_tbody: return {}
-
-                first_places = []
-                header_row = target_tbody.parent.select_one("thead tr")
-                if header_row:
-                    th_tags = header_row.find_all('th', recursive=False)
-                    for th in th_tags:
-                        if th.has_attr('class') and any('is-boatColor' in c for c in th['class']):
-                            th_text = th.get_text(strip=True)
-                            num_match = re.match(r'^\s*(\d+)', th_text)
-                            if num_match:
-                                num = num_match.group(1)
-                                if num not in first_places:
-                                    first_places.append(num)
-                                    if len(first_places) == 6: break
-                
-                if len(first_places) != 6:
-                     first_places = [str(i) for i in range(1, 7)]
-
-                rows = target_tbody.find_all('tr', recursive=False)
-                num_cols = len(first_places)
-                current_boat2 = [''] * num_cols
-                rowspan_remaining = [0] * num_cols
-
-                for r_idx, row in enumerate(rows):
-                    cells = row.find_all('td', recursive=False)
-                    cell_ptr = 0
-                    for col_idx in range(num_cols):
-                        first_boat = first_places[col_idx]
-                        boat2 = ""
-                        boat3 = ""
-                        odds_val = None
-                        
-                        try:
-                            if rowspan_remaining[col_idx] > 0:
-                                rowspan_remaining[col_idx] -= 1
-                                if cell_ptr + 1 < len(cells):
-                                    boat2 = current_boat2[col_idx]
-                                    boat3 = cells[cell_ptr].get_text(strip=True)
-                                    odds_txt = cells[cell_ptr + 1].get_text(strip=True).replace('倍', '').replace(',', '')
-                                    try: odds_val = float(odds_txt)
-                                    except: pass
-                                    cell_ptr += 2
-                                else: continue
-                            else:
-                                if cell_ptr >= len(cells): break
-                                current_cell = cells[cell_ptr]
-                                if current_cell.has_attr('rowspan'):
-                                    boat2_text = current_cell.get_text(strip=True)
-                                    if boat2_text.isdigit():
-                                        current_boat2[col_idx] = boat2_text
-                                        boat2 = boat2_text
-                                        try: rowspan_remaining[col_idx] = max(0, int(current_cell['rowspan']) - 1)
-                                        except: rowspan_remaining[col_idx] = 0
-                                        if cell_ptr + 2 < len(cells):
-                                            boat3 = cells[cell_ptr+1].get_text(strip=True)
-                                            odds_txt = cells[cell_ptr+2].get_text(strip=True).replace('倍', '').replace(',', '')
-                                            try: odds_val = float(odds_txt)
-                                            except: pass
-                                            cell_ptr += 3
-                                        else:
-                                            cell_ptr += 1
-                                            continue
-                                    else:
-                                        cell_ptr += 1
-                                        continue
-                                else:
-                                    cell_ptr +=1
-                                    continue
-                            
-                            if boat2.isdigit() and boat3.isdigit() and first_boat != boat2 and first_boat != boat3 and boat2 != boat3 and odds_val is not None and odds_val > 0:
-                                odds_data[f"{first_boat}-{boat2}-{boat3}"] = odds_val
-                        except: pass
-            except: pass
-        return odds_data
-
-    @staticmethod
-    def get_race_data(date_str, venue_code, race_no):
-        jcd = f"{int(venue_code):02d}"
-        url_before = f"https://www.boatrace.jp/owpc/pc/race/beforeinfo?rno={race_no}&jcd={jcd}&hd={date_str}"
-        url_list = f"https://www.boatrace.jp/owpc/pc/race/racelist?rno={race_no}&jcd={jcd}&hd={date_str}"
-        
-        soup_before = BoatRaceScraper.get_soup(url_before)
-        soup_list = BoatRaceScraper.get_soup(url_list)
-        
-        odds_map = BoatRaceScraper.get_odds(date_str, venue_code, race_no)
-        
-        if not soup_before or not soup_list:
-            return None
-            
-        weather = {'wind_direction': 0, 'wind_speed': 0.0, 'wave_height': 0.0}
-        try:
-            w = soup_before.select_one("div.weather1_body")
-            if w:
-                ws = w.select_one(".is-wind span.weather1_bodyUnitLabelData")
-                if ws: weather['wind_speed'] = BoatRaceScraper.parse_float(ws.text)
-                wh = w.select_one(".is-wave span.weather1_bodyUnitLabelData")
-                if wh: weather['wave_height'] = BoatRaceScraper.parse_float(wh.text)
-                wd = w.select_one(".is-windDirection p")
-                if wd:
-                    cls = wd.get('class', [])
-                    d = next((c for c in cls if c.startswith('is-wind') and c != 'is-windDirection'), None)
-                    if d: weather['wind_direction'] = int(re.sub(r'\D', '', d))
-        except: pass
-
-        boat_before = {}
-        try:
-            # Parse Exhibition Time (Table is-w748)
-            for i, tb in enumerate(soup_before.select("table.is-w748 tbody")):
-                tds = tb.select("td")
-                ex_val = None
-                if len(tds) >= 5:
-                    txt = tds[4].get_text(strip=True)
-                    # Check if valid number (not empty or nbsp)
-                    if txt and txt != '\xa0':
-                         try:
-                             ex_val = float(re.search(r'([\d\.]+)', txt).group(1))
-                         except: pass
-                
-                # If parsed, store it.
-                if ex_val is not None:
-                    if (i+1) not in boat_before: boat_before[i+1] = {}
-                    boat_before[i+1]['ex_time'] = ex_val
-            
-            # Parse ST
-            for idx, row in enumerate(soup_before.select("table.is-w238 tbody tr")):
-                bn_span = row.select_one("span.table1_boatImage1Number")
-                if bn_span:
-                    b = int(bn_span.text.strip())
-                    pred_c = idx + 1
-                    st_span = row.select_one("span.table1_boatImage1Time")
-                    val = 0.20
-                    if st_span:
-                        txt_raw = st_span.text.strip()
-                        if 'L' in txt_raw: val = 1.0
-                        elif 'F' in txt_raw:
-                            try:
-                                sub = txt_raw.replace('F', '')
-                                val = -float(sub)
-                            except: val = -0.05
-                        else:
-                            val = BoatRaceScraper.parse_float(txt_raw)
-                            
-                    if b not in boat_before: boat_before[b] = {}
-                    boat_before[b]['st'] = val
-                    boat_before[b]['pred_course'] = pred_c
-        except: pass
-
-        rows = []
-        try:
-            for i, tb in enumerate(soup_list.select("tbody.is-fs12")):
-                bn = i + 1
-                if bn > 6: break
-                
-                # Check Absence based on Missing Exhibition Time
-                # If boat not in boat_before OR ex_time is None => Absent
-                if bn not in boat_before or 'ex_time' not in boat_before[bn]:
-                    # Log or just skip
-                    # print(f"Boat {bn} Absent (No Ex Time)")
-                    continue
-                
-                racer_id = 9999
-                try: 
-                    txt = tb.select("td")[2].select_one("div").get_text()
-                    racer_id = int(re.search(r'(\d{4})', txt).group(1))
-                except: pass
-
-                branch = 'Unknown'
-                weight = 52.0
-                try:
-                    td2 = tb.select("td")[2]
-                    txt_full = td2.get_text(" ", strip=True)
-                    match_w = re.search(r'(\d{2}\.\d)kg', txt_full)
-                    if match_w: weight = float(match_w.group(1))
-                    
-                    prefectures = r"(群馬|埼玉|東京|福井|静岡|愛知|三重|滋賀|大阪|兵庫|徳島|香川|岡山|広島|山口|福岡|佐賀|長崎)"
-                    m = re.search(prefectures, txt_full)
-                    if m: branch = m.group(1)
-                except: pass
-
-                nat_win_rate = 0.0
-                local_win_rate = 0.0
-                try:
-                    col3_txt = tb.select("td")[3].get_text(" ", strip=True)
-                    clean_txt = re.sub(r'[FLK]\d+', '', col3_txt) 
-                    nums = re.findall(r'(\d+(?:\.\d+)?)', clean_txt)
-                    if len(nums) >= 5:
-                        nat_win_rate = float(nums[1])
-                        local_win_rate = float(nums[3])
-                    elif len(nums) >= 4:
-                        nat_win_rate = float(nums[0])
-                        local_win_rate = float(nums[2])
-                except: pass
-
-                prior_results = ""
-                try:
-                    rank_row = tb.select_one("tr.is-fBold")
-                    if rank_row:
-                        res_texts = [td.get_text(strip=True) for td in rank_row.select("td")]
-                        cleaned_res = []
-                        for t in res_texts:
-                            if not t: continue
-                            t_norm = t.translate(str.maketrans('０１２３４５６７８９', '0123456789'))
-                            if re.match(r'^[1-6FLKS欠失転不]$', t_norm):
-                                cleaned_res.append(t_norm)
-                        prior_results = " ".join(cleaned_res)
-                except: pass
-
-                tds = tb.select("td")
-                motor = 30.0
-                try:
-                    txt = tds[6].get_text(" ", strip=True).replace('%', '')
-                    parts = txt.split()
-                    if len(parts) >= 2: motor = float(parts[1])
-                    else: motor = float(parts[0])
-                except: pass
-                
-                boat = 30.0
-                try:
-                    # Index 7 Check
-                    if len(tds) > 7:
-                        txt = tds[7].get_text(" ", strip=True).replace('%', '')
-                        parts = txt.split()
-                        if len(parts) >= 2: boat = float(parts[1])
-                        else: boat = float(parts[0])
-                except: pass
-                
-                row = {
-                    'race_id': f"{date_str}_{venue_code}_{race_no}",
-                    'boat_number': bn,
-                    'racer_id': racer_id,
-                    'motor_rate': motor,
-                    'boat_rate': boat,
-                    'exhibition_time': boat_before[bn]['ex_time'], # Guaranteed present
-                    'exhibition_start_timing': boat_before.get(bn, {}).get('st', 0.20),
-                    'pred_course': boat_before.get(bn, {}).get('pred_course', bn),
-                    'wind_direction': weather['wind_direction'],
-                    'wind_speed': weather['wind_speed'],
-                    'wave_height': weather['wave_height'],
-                    'prior_results': prior_results,
-                    'branch': branch,
-                    'weight': weight,
-                    'nat_win_rate': nat_win_rate,
-                    'local_win_rate': local_win_rate
-                    # Remove syn_win_rate as it was for Tansho and we now fetch 3-ren-tan later
-                }
-                rows.append(row)
-        except Exception as e:
-            st.error(f"List Parse Error: {e}")
-            return None
-            
-        return pd.DataFrame(rows)
-
+    try:
+        model_h = lgb.Booster(model_file=MODEL_HONMEI_PATH)
+        model_a = lgb.Booster(model_file=MODEL_ANA_PATH)
+        st.sidebar.success("Honmei & Ana Models Loaded Successfully!")
+        return {'honmei': model_h, 'ana': model_a}
+    except Exception as e:
+        st.error(f"FATAL Model Load Error: {e}")
+        st.code(traceback.format_exc())
+        return None
 
 def add_advanced_features(df):
     # 1. F (Flying) Analysis & ST Correction
@@ -332,7 +65,7 @@ def add_advanced_features(df):
         df['corrected_st'] = 0.20
         
     # Inner ST Gap Corrected
-    df = df.sort_values(['race_id', 'boat_number']) # Ensure sort (app processes 1 race, but safe to sort)
+    df = df.sort_values(['race_id', 'boat_number'])
     prev_sts = df['corrected_st'].shift(1)
     df['inner_st_gap_corrected'] = df['corrected_st'] - prev_sts
     df.loc[df['boat_number'] == 1, 'inner_st_gap_corrected'] = 0.0
@@ -380,7 +113,7 @@ def add_advanced_features(df):
             '桐生': '01', '戸田': '02', '江戸川': '03', '平和島': '04', '多摩川': '05',
             '浜名湖': '06', '蒲郡': '07', '常滑': '08', '津': '09', '三国': '10',
             'びわこ': '11', '住之江': '12', '尼崎': '13', '鳴門': '14', '丸亀': '15',
-            '児島': '16', '宮島': '17', '徳山': '18', '下関': '19', '若松': 20,
+            '児島': '16', '宮島': '17', '徳山': '18', '下関': '19', '若松': '20',
             '芦屋': '21', '福岡': '22', '唐津': '23', '大村': '24'
         }
         
@@ -389,17 +122,17 @@ def add_advanced_features(df):
             df = df.merge(bias_df, left_on=['temp_venue_code', 'boat_number'], right_on=['venue_code', 'boat_number'], how='left')
             df.drop(columns=['temp_venue_code', 'venue_code'], inplace=True, errors='ignore')
             
-            # Fill NaNs
             if 'venue_frame_win_rate' in df.columns:
                 df['venue_frame_win_rate'] = df['venue_frame_win_rate'].fillna(0.16)
             else:
-                 df['venue_frame_win_rate'] = 0.0 # Merge failed?
+                 df['venue_frame_win_rate'] = 0.0
         else:
             df['venue_frame_win_rate'] = 0.0
     else:
         df['venue_frame_win_rate'] = 0.0
         
     return df
+
 class FeatureEngineer:
     @staticmethod
     def process(df, venue_name, debug_mode=False):
@@ -461,7 +194,6 @@ class FeatureEngineer:
         for c in required_cols:
             if c not in df.columns: df[c] = 0.0
             
-        # Features
         def parse_prior(x):
             if isinstance(x, (int, float)): return float(x)
             if not isinstance(x, str): return 3.5
@@ -481,11 +213,10 @@ class FeatureEngineer:
         df = add_advanced_features(df)
 
         df = df.sort_values('pred_course')
-        # Use corrected_st if available
         st_col = 'corrected_st' if 'corrected_st' in df.columns else 'exhibition_start_timing'
         
         df['inner_st'] = df[st_col].shift(1).fillna(0)
-        df['inner_st_gap'] = df[st_col] - df['inner_st'] # Overwrite
+        df['inner_st_gap'] = df[st_col] - df['inner_st']
         df['outer_st'] = df[st_col].shift(-1).fillna(0)
         avg_neighbor = (df['inner_st'] + df['outer_st']) / 2
         df['slit_formation'] = df[st_col] - avg_neighbor
@@ -530,55 +261,27 @@ class FeatureEngineer:
 
         if 'race_date' not in df.columns: df['race_date'] = '20000101'
         
-        # Win Direction Mapping (Int -> String to match Training Data)
+        # Win Direction Mapping
         wind_map = {
             1: '北', 2: '北北東', 3: '北東', 4: '東北東', 5: '東', 6: '東南東', 7: '南東', 8: '南南東',
             9: '南', 10: '南南西', 11: '南西', 12: '西南西', 13: '西', 14: '西北西', 15: '北西', 16: '北北西'
         }
-        # Only map if numeric
         if pd.api.types.is_numeric_dtype(df['wind_direction']):
              df['wind_direction'] = df['wind_direction'].map(wind_map).fillna(df['wind_direction'])
-             # If mapping leaves numbers (e.g. 0), coerce to string or handle?
-             # Train data likely has "南" etc. 0 might be problematic if not in train categories.
-             # Convert to string to ensure it becomes category later.
              df['wind_direction'] = df['wind_direction'].astype(str)
-             # Handle 'nan' string if any
              df['wind_direction'] = df['wind_direction'].replace('nan', '')
 
-        # Categorical Conversion (Must match train_model.py logic)
-        # First, try to convert everything to numeric (like pd.read_csv does)
-        # Use errors='coerce' to force non-parseable strings to NaN (float), 
-        # preventing them from staying as Object and becoming Category.
         for col in df.columns:
             if col not in ['race_id', 'race_date', 'venue_name', 'prior_results', 'wind_direction', 'branch', 'class', 'racer_class']:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
         
-        # Then convert remaining objects to category
-        # train_model.py ignores: ['race_id', 'race_date', 'prior_results']
         ignore_cols = ['race_id', 'race_date', 'prior_results', 'pred_score', 'weight_for_loss', 'relevance', 'rank']
-        
         for col in df.columns:
             if col in ignore_cols: continue
             if df[col].dtype == 'object':
                 df[col] = df[col].astype('category')
 
         return df
-
-    @staticmethod
-    def get_features_subset(df, mode='honmei'):
-        base_ignore = [
-            'race_id', 'boat_number', 'racer_id', 'rank', 'relevance',
-            'race_date', 'venue_name', 'prior_results', 'weight_for_loss', 'pred_score', 'score',
-            # Extra columns created in app but not in training
-            'wind_angle_deg', 'venue_tailwind_deg', 'venue_code_int',
-            'weather', 'boat_before', 'params'
-        ]
-        odds_features = ['syn_win_rate', 'odds', 'prediction_odds', 'popularity', 'vote_count', 'win_share']
-        
-        all_cols = df.columns.tolist()
-        candidates = [c for c in all_cols if c not in base_ignore]
-        
-        return candidates
 
 def calculate_plackett_luce_probs(honmei_scores_dict):
     boats = list(honmei_scores_dict.keys())
@@ -588,7 +291,6 @@ def calculate_plackett_luce_probs(honmei_scores_dict):
     p1 = exp_scores / np.sum(exp_scores)
     p1_dict = {boats[i]: p1[i] for i in range(len(boats))}
     
-    import itertools
     combos = list(itertools.permutations(boats, 3))
     pl_probs = []
     for c in combos:
@@ -606,7 +308,6 @@ def calculate_plackett_luce_probs(honmei_scores_dict):
         
     pl_probs.sort(key=lambda x: x['prob'], reverse=True)
     
-    # フィルター指標用
     p1_sorted = sorted(p1_dict.items(), key=lambda x: x[1], reverse=True)
     max_p1 = float(p1_sorted[0][1])
     prob_gap = float(pl_probs[0]['prob'] - pl_probs[1]['prob']) if len(pl_probs) >= 2 else 0.0
@@ -619,7 +320,6 @@ def select_hybrid_formation_plan_b(pl_probs, ana_scores_dict, all_odds):
     top_odds = all_odds.get(top_combo, 0)
     if top_odds < 1: return []
     
-    import math
     N = int(min(8, math.floor(top_odds)))
     if N < 1: return []
     
@@ -666,147 +366,168 @@ def calculate_funds_distribution(selected_combos, pl_probs_list, all_odds, base_
             return bets_flat
     return bets
 
-# --- 3. Main App ---
-st.title("🚤 BoatRace AI Dual Strategy System")
-st.markdown("Returns specific predictions using two specialized models.")
+def get_race_selection():
+    st.sidebar.header("Race Selection")
+    date = st.sidebar.date_input("Date", datetime.date.today())
+    venue = st.sidebar.selectbox("Venue", ["桐生", "戸田", "江戸川", "平和島", "多摩川", "浜名湖", "蒲郡", "常滑", "津", "三国", "びわこ", "住之江", "尼崎", "鳴門", "丸亀", "児島", "宮島", "徳山", "下関", "若松", "芦屋", "福岡", "唐津", "大村"])
+    race_no = st.sidebar.slider("Race No", 1, 12, 1)
+    return date, venue, race_no
 
-today = datetime.date.today()
-target_date = st.sidebar.date_input("Date", today)
-venue_map = {
-    1: '桐生', 2: '戸田', 3: '江戸川', 4: '平和島', 5: '多摩川',
-    6: '浜名湖', 7: '蒲郡', 8: '常滑', 9: '津', 10: '三国',
-    11: 'びわこ', 12: '住之江', 13: '尼崎', 14: '鳴門', 15: '丸亀',
-    16: '児島', 17: '宮島', 18: '徳山', 19: '下関', 20: '若松',
-    21: '芦屋', 22: '福岡', 23: '唐津', 24: '大村'
-}
-venue_code = st.sidebar.selectbox("Venue", list(venue_map.keys()), format_func=lambda x: f"{x:02d}: {venue_map[x]}")
-venue_name = venue_map[venue_code]
-race_no = st.sidebar.selectbox("Race No", range(1, 13))
-
-debug_mode = st.sidebar.checkbox("Show Debug Info", value=False)
-st.sidebar.markdown("---")
-st.sidebar.markdown("**💰 Budget Settings**")
-base_budget = st.sidebar.number_input("Base Budget (Flat Payout)", min_value=0, max_value=10000, value=1000, step=100)
-bonus_budget = st.sidebar.number_input("Bonus Budget (EV Boost)", min_value=0, max_value=10000, value=500, step=100)
-
-if st.button("Analyze Race", type="primary"):
-    st.session_state['run_analysis'] = True
-    st.session_state['target_props'] = {
-        'date': target_date.strftime('%Y%m%d'),
-        'venue': venue_code,
-        'race': race_no,
-        'v_name': venue_name
-    }
-
-if st.session_state.get('run_analysis'):
-    props = st.session_state['target_props']
-    st.info(f"Analyzing: {props['v_name']} {props['race']}R ({props['date']})")
+def main():
+    st.title("🚤 BoatRace AI V3.1+ (Plan B Investment Strategy Engine)")
+    st.markdown("本命・穴デュアルモデルを用いた確率＆オッズ連動型自動投資・資金分配エンジン")
     
-    with st.spinner("Scraping Data..."):
-        df_race = BoatRaceScraper.get_race_data(props['date'], props['venue'], props['race'])
+    # Sidebar
+    st.sidebar.header("💰 Investment Config")
+    base_budget = st.sidebar.number_input("Base Budget (Flat Payout)", min_value=0, max_value=10000, value=1000, step=100)
+    bonus_budget = st.sidebar.number_input("Bonus Budget (EV Boost)", min_value=0, max_value=10000, value=500, step=100)
+    
+    debug_mode = st.sidebar.checkbox("Show Debug Info", value=False)
+    
+    date_dt, venue_name, race_no = get_race_selection()
+    date_str = date_dt.strftime("%Y%m%d")
+    
+    INV_PLACE_CODE = {v: k for k, v in config.PLACE_CODE_TO_NAME.items()}
+    place_code = INV_PLACE_CODE.get(venue_name, "01")
+    
+    models = load_models()
+    
+    if st.sidebar.button("Analyze & Predict Race", type="primary"):
+        if models is None:
+            st.error("Models failed to load.")
+            return
 
-    if df_race is not None:
-        st.subheader("Race Data")
-        st.dataframe(df_race[['boat_number', 'racer_id', 'motor_rate', 'exhibition_time', 'exhibition_start_timing', 'syn_win_rate']])
-        
-        with st.spinner("Engineering Features..."):
-            df_feat = FeatureEngineer.process(df_race, props['v_name'], debug_mode=debug_mode)
-        
-        # --- Prediction ---
-        st.subheader("🤖 AI Prediction (3-Ren Tan - Plan B)")
-        
-        if os.path.exists(MODEL_HONMEI_PATH) and os.path.exists(MODEL_ANA_PATH):
+        with st.spinner("Scraping Live Race Data & Odds..."):
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
             try:
-                model_h = lgb.Booster(model_file=MODEL_HONMEI_PATH)
-                model_a = lgb.Booster(model_file=MODEL_ANA_PATH)
-                
-                # Robust Feature Selection: Get exact features from model
-                feats_h = model_h.feature_name()
-                feats_a = model_a.feature_name()
-                
-                known_cats = ['branch', 'wind_direction', 'venue_code_y', 'class', 'racer_class']
-                
-                for f in feats_h:
-                    if f not in df_feat.columns:
-                        if f in known_cats:
-                            df_feat[f] = '00' 
-                            df_feat[f] = df_feat[f].astype('category')
-                        else:
-                            df_feat[f] = 0.0
-                    else:
-                        if f in known_cats and not pd.api.types.is_categorical_dtype(df_feat[f]):
-                            df_feat[f] = df_feat[f].astype(str).astype('category')
-                            
-                for f in feats_a:
-                    if f not in df_feat.columns:
-                        if f in known_cats:
-                            df_feat[f] = '00' 
-                            df_feat[f] = df_feat[f].astype('category')
-                        else:
-                            df_feat[f] = 0.0
-                    else:
-                        if f in known_cats and not pd.api.types.is_categorical_dtype(df_feat[f]):
-                            df_feat[f] = df_feat[f].astype(str).astype('category')
+                scraped_data = loop.run_until_complete(get_realtime_data(date_str, place_code, str(race_no)))
+            finally:
+                loop.close()
+        
+        if not scraped_data:
+            st.error("Failed to fetch data. Check race schedule or network.")
+            return
 
-                preds_h = model_h.predict(df_feat[feats_h])
-                preds_a = model_a.predict(df_feat[feats_a])
-                
-                df_feat['score_honmei'] = preds_h
-                df_feat['score_ana'] = preds_a
-                
-                scores_h = dict(zip(df_feat['boat_number'], df_feat['score_honmei']))
-                scores_a = dict(zip(df_feat['boat_number'], df_feat['score_ana']))
-                
-                pl_probs, max_p1, prob_gap = calculate_plackett_luce_probs(scores_h)
-                
-                # Get live odds for calculation
-                # We already have syn_win_rate in df_feat, but we need all 120 odds
-                # The get_odds method in scraper was used inside get_race_data and returned odds_map.
-                # However, get_odds currently returns map with keys as INT (e.g. 123) or just Tansho.
-                # Wait, BoatRaceScraper.get_odds parses "単勝" (Win). We need 3-Ren Tan odds!
-                # Actually, in simulate_betting.py, get_all_trifecta_odds fetches from DB.
-                # Since this is a live app, we need to fetch live 3-Ren Tan odds.
-                # But to avoid complex scraping right here, we can fallback to using prediction or just dummy if live odds scraper for trifecta is not implemented.
-                # I will implement a quick odds check or just show the combos if we can't scrape them live easily.
-                
-                st.markdown("---")
-                st.write(f"**Max 1st Prob (P1):** `{max_p1:.4f}` | **Prob Gap:** `{prob_gap:.4f}`")
-                
-                # Plan B Filter Thresholds
-                if max_p1 >= 0.49 and prob_gap >= 0.010:
-                    st.success("🎯 **Target Race (Plan B)** - Optimal conditions met.")
+        try:
+            race_info = scraped_data['race_info']
+            all_odds = scraped_data['odds_info']
+            
+            # Create feature input from scraped_data
+            entries = race_info['entries']
+            before = race_info['before_info']
+            
+            rows = []
+            for idx, row in entries.iterrows():
+                bn = int(row['boat_number'])
+                rows.append({
+                    'race_id': f"{race_info['date']}_{race_info['place']}_{race_info['race_no']}",
+                    'boat_number': bn,
+                    'racer_id': int(row['racer_id']) if pd.notna(row['racer_id']) else 9999,
+                    'motor_rate': float(row['motor_rate']) if pd.notna(row['motor_rate']) else 30.0,
+                    'boat_rate': float(row['boat_rate']) if pd.notna(row['boat_rate']) else 30.0,
+                    'exhibition_time': float(before['exhibition_times'].get(bn, 6.8)),
+                    'exhibition_start_timing': float(before['start_times'].get(bn, 0.20)),
+                    'pred_course': int(before['exhibition_entry_courses'].get(bn, bn)),
+                    'wind_direction': before.get('wind_direction', 0),
+                    'wind_speed': float(before.get('wind_speed', 0.0)) if before.get('wind_speed') is not None else 0.0,
+                    'wave_height': float(before.get('wave_height', 0.0)) if before.get('wave_height') is not None else 0.0,
+                    'prior_results': row.get('prior_results', ''),
+                    'branch': row.get('branch', 'Unknown'),
+                    'weight': float(row['weight']) if pd.notna(row['weight']) else 52.0,
+                    'nat_win_rate': float(row['nat_win_rate']) if pd.notna(row['nat_win_rate']) else 0.0,
+                    'local_win_rate': float(row['loc_win_rate']) if pd.notna(row['loc_win_rate']) else 0.0
+                })
+            df_race = pd.DataFrame(rows)
+            
+            df_feat = FeatureEngineer.process(df_race, venue_name, debug_mode=debug_mode)
+            
+            # Predict
+            model_h = models['honmei']
+            model_a = models['ana']
+            
+            feats_h = model_h.feature_name()
+            feats_a = model_a.feature_name()
+            
+            known_cats = ['branch', 'wind_direction', 'venue_code_y', 'class', 'racer_class']
+            
+            for f in feats_h:
+                if f not in df_feat.columns:
+                    if f in known_cats:
+                        df_feat[f] = '00' 
+                        df_feat[f] = df_feat[f].astype('category')
+                    else:
+                        df_feat[f] = 0.0
                 else:
-                    st.warning("☕ **Skip (Ken)** - Does not meet Plan B confidence thresholds.")
-                
-                # Dynamic N and Hybrid Formation
-                # We have the live odds!
-                # all_odds is stored in df_race internally, wait, df_race didn't save all_odds directly.
-                # Let's fetch it again quickly or we can just fetch it here.
-                all_odds = BoatRaceScraper.get_odds(props['date'], props['venue'], props['race'])
-                
-                selected_combos = select_hybrid_formation_plan_b(pl_probs, scores_a, all_odds)
-                bets = calculate_funds_distribution(selected_combos, pl_probs, all_odds, base_budget, bonus_budget)
-                
-                if not selected_combos:
-                    st.info("No combinations selected (Odds too low).")
+                    if f in known_cats and not pd.api.types.is_categorical_dtype(df_feat[f]):
+                        df_feat[f] = df_feat[f].astype(str).astype('category')
+                        
+            for f in feats_a:
+                if f not in df_feat.columns:
+                    if f in known_cats:
+                        df_feat[f] = '00' 
+                        df_feat[f] = df_feat[f].astype('category')
+                    else:
+                        df_feat[f] = 0.0
                 else:
-                    st.markdown("#### Plan B Buying List (Funds Distribution)")
-                    st.info("📊 Live 3-Ren Tan odds integrated.")
+                    if f in known_cats and not pd.api.types.is_categorical_dtype(df_feat[f]):
+                        df_feat[f] = df_feat[f].astype(str).astype('category')
+
+            preds_h = model_h.predict(df_feat[feats_h])
+            preds_a = model_a.predict(df_feat[feats_a])
+            
+            df_feat['score_honmei'] = preds_h
+            df_feat['score_ana'] = preds_a
+            
+            scores_h = dict(zip(df_feat['boat_number'], df_feat['score_honmei']))
+            scores_a = dict(zip(df_feat['boat_number'], df_feat['score_ana']))
+            
+            pl_probs, max_p1, prob_gap = calculate_plackett_luce_probs(scores_h)
+            
+            st.subheader("📊 Race Inference Analytics")
+            st.write(f"**Max 1st Prob (P1):** `{max_p1:.4f}` | **Prob Gap:** `{prob_gap:.4f}`")
+            
+            # Plan B Filter Thresholds
+            is_target_race = (max_p1 >= 0.49 and prob_gap >= 0.010)
+            if is_target_race:
+                st.success("🎯 **Target Race (Plan B)** - Optimal conditions met. Recommended to Bet!")
+            else:
+                st.warning("☕ **Skip (Ken)** - Does not meet Plan B confidence thresholds. Recommend watching only.")
+            
+            selected_combos = select_hybrid_formation_plan_b(pl_probs, scores_a, all_odds)
+            bets = calculate_funds_distribution(selected_combos, pl_probs, all_odds, base_budget, bonus_budget)
+            
+            st.markdown("---")
+            if not selected_combos:
+                st.info("No combinations selected (Odds too low or no options meet constraints).")
+            else:
+                st.markdown("### 🎯 Recommended Buying List (Plan B)")
+                
+                df_bets = pd.DataFrame([
+                    {
+                        'Combo': c,
+                        'PL Prob': f"{next(p['prob'] for p in pl_probs if p['combo'] == c):.2%}",
+                        'Live Odds': f"{all_odds.get(c, 0.0):.1f}",
+                        'Bet Amount (JPY)': bets.get(c, 100),
+                        'Est. Return': int(bets.get(c, 100) * all_odds.get(c, 0.0))
+                    }
+                    for c in selected_combos
+                ])
+                st.dataframe(df_bets, hide_index=True)
+                st.success(f"**Total Investment:** {sum(bets.values())} JPY")
+            
+            if debug_mode:
+                with st.expander("🛠 Raw Data Debug View"):
+                    st.write(f"**Engineered Features:**")
+                    st.dataframe(df_feat)
+                    st.write("**Top Plackett-Luce Probabilities:**")
+                    st.write(pl_probs[:10])
                     
-                    df_bets = pd.DataFrame([
-                        {
-                            'Combo': c,
-                            'PL Prob': f"{next(p['prob'] for p in pl_probs if p['combo'] == c):.2%}",
-                            'Live Odds': f"{all_odds.get(c, 0.0):.1f}",
-                            'Bet Amount (JPY)': bets.get(c, 100),
-                            'Est. Return': int(bets.get(c, 100) * all_odds.get(c, 0.0))
-                        }
-                        for c in selected_combos
-                    ])
-                    st.dataframe(df_bets, hide_index=True)
-                    st.success(f"**Total Investment:** {sum(bets.values())} JPY")
-                
-            except Exception as e:
-                st.error(f"Prediction Error: {e}")
-        else:
-            st.warning("Model files not found. Please ensure model_honmei.txt and model_ana.txt exist.")
+        except Exception as e:
+            st.error(f"Prediction Error: {e}")
+            st.code(traceback.format_exc())
+            logger.error(f"Prediction flow failed: {e}")
+            return
+
+if __name__ == "__main__":
+    main()

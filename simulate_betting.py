@@ -1,4 +1,3 @@
-
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
@@ -6,157 +5,138 @@ import sqlite3
 import itertools
 import os
 import train_model
+import math
 
 # Config
 MODEL_PATH = 'model_honmei.txt'
+MODEL_ANA_PATH = 'model_ana.txt'
 DATA_PATH = 'boatrace_dataset_labeled_v2.csv'
 DB_PATH = r'D:\BOAT2504_Base_line\BOAT2504_DB\boatrace.db'
 
-# Constants
-INITIAL_BET = 100
-BET_STEP = 100
-MAX_BET_PER_BOAT = 2000
-MAX_TOTAL_BET = 5000
+# プランB（購入率50%制限・厳格なレースフィルター）を有効にする
+USE_PLAN_B = True 
 
 def get_db_connection():
     return sqlite3.connect(DB_PATH)
 
-def calculate_trifecta_scores(scores, sorted_boats):
+def calculate_plackett_luce_probs(honmei_scores_dict):
     """
-    Generate Top 5 Trifecta Combinations based on individual boat scores.
+    本命スコアからSoftmaxとPlackett-Luceモデルを用いて3連単の合成確率を算出する
+    Returns: pl_probs (list), max_p1 (float)
     """
-    # Simple logic: Top 5 scored boats permutation?
-    # Or just permutations of top N boats sorted by sum of scores?
-    # app_boatrace uses: 
-    # combs = list(itertools.permutations(sorted_boats[:4], 3)) 
-    # score = sum(scores[b] for b in comb)
-    # Then sort.
+    boats = list(honmei_scores_dict.keys())
+    scores = np.array([honmei_scores_dict[b] for b in boats])
     
-    # We replicate app logic
-    # Take top 4 boats to form combos (4P3 = 24 combos)
-    # Filter top 5 by combined score
+    max_score = np.max(scores)
+    exp_scores = np.exp(scores - max_score)
+    p1 = exp_scores / np.sum(exp_scores)
+    max_p1 = float(np.max(p1))
     
-    candidates = sorted_boats[:4]
-    combos = list(itertools.permutations(candidates, 3))
+    p1_dict = {boats[i]: p1[i] for i in range(len(boats))}
     
-    combo_data = []
+    combos = list(itertools.permutations(boats, 3))
+    pl_probs = []
+    
     for c in combos:
-        # Score sum
-        s = sum(scores[b] for b in c)
-        combo_str = f"{c[0]}-{c[1]}-{c[2]}"
-        combo_data.append({'combo': combo_str, 'score': s})
+        b1, b2, b3 = c
+        prob1 = p1_dict[b1]
+        denom2 = 1.0 - p1_dict[b1]
+        if denom2 <= 0: denom2 = 1e-9
+        prob2 = p1_dict[b2] / denom2
+        denom3 = 1.0 - p1_dict[b1] - p1_dict[b2]
+        if denom3 <= 0: denom3 = 1e-9
+        prob3 = p1_dict[b3] / denom3
         
-    df_combos = pd.DataFrame(combo_data)
-    df_combos = df_combos.sort_values('score', ascending=False).head(5)
-    return df_combos
+        total_prob = prob1 * prob2 * prob3
+        combo_str = f"{b1}-{b2}-{b3}"
+        pl_probs.append({'combo': combo_str, 'prob': total_prob})
+        
+    pl_probs.sort(key=lambda x: x['prob'], reverse=True)
+    return pl_probs, max_p1
 
-def get_odds_from_db(conn, race_id, combos):
-    """
-    Fetch trifecta odds for specific combinations from DB.
-    """
-    # Format: combination '1-2-3' matches DB '123' if '123' layout.
-    # DB has '123'. app_boatrace uses '1-2-3'.
-    # We must strip hyphens.
-    
-    target_combinations = [c.replace('-', '') for c in combos]
-    
-    if not target_combinations:
-        return {}
-        
-    placeholders = ",".join(["?"] * len(target_combinations))
-    query = f"""
-        SELECT combination, odds_1min 
-        FROM odds_data 
-        WHERE race_id = ? AND combination IN ({placeholders})
-    """
-    
-    params = [race_id] + target_combinations
+def get_all_trifecta_odds(conn, race_id):
+    query = "SELECT combination, odds_1min FROM odds_data WHERE race_id = ? AND length(combination) = 3"
     try:
         cursor = conn.cursor()
-        cursor.execute(query, params)
+        cursor.execute(query, [race_id])
         rows = cursor.fetchall()
-        
-        # Map back to '1-2-3' format if needed or keep raw
-        # Return dict: {'1-2-3': 15.5, ...}
         
         odds_map = {}
         for r in rows:
-            comb_db = r[0] # '123'
-            val = r[1]
-            # Convert '123' -> '1-2-3'
-            comb_fmt = f"{comb_db[0]}-{comb_db[1]}-{comb_db[2]}"
-            odds_map[comb_fmt] = val
-            
+            comb_db = str(r[0])
+            if len(comb_db) == 3:
+                val = r[1]
+                comb_fmt = f"{comb_db[0]}-{comb_db[1]}-{comb_db[2]}"
+                odds_map[comb_fmt] = val
         return odds_map
     except Exception as e:
-        # print(f"Error fetching odds: {e}")
         return {}
 
-def staircase_betting_logic(predictions_df):
-    """
-    predictions_df: DataFrame with columns ['combo', 'odds', 'score']
-    Returns: list of bet amounts corresponding to rows
-    """
-    # Sort by Odds Ascending
-    # predictions_df must have 'odds' column populated. Nan if missing.
+def select_hybrid_formation(pl_probs, ana_scores_dict, all_odds):
+    if not pl_probs or not all_odds:
+        return []
+        
+    top_combo = pl_probs[0]['combo']
+    top_odds = all_odds.get(top_combo, 0)
     
-    df = predictions_df.copy()
-    df['bet'] = 0
+    if top_odds < 1:
+        return [] 
+        
+    N = int(min(8, math.floor(top_odds)))
+    if N < 1:
+        return [] 
+        
+    selected = [p['combo'] for p in pl_probs[:N]]
     
-    # Filter valid odds
-    df = df.dropna(subset=['odds'])
-    df = df[df['odds'] > 0]
-    df = df.sort_values('odds', ascending=True)
+    best_ana_boat = max(ana_scores_dict, key=ana_scores_dict.get)
+    best_ana_boat_str = str(best_ana_boat)
     
-    if df.empty:
-        return {} # No bets
-        
-    total_investment = 0
-    bets = {} # combo -> amount
+    ana_in_3rd = any(c.split('-')[2] == best_ana_boat_str for c in selected)
     
-    for idx, row in df.iterrows():
-        combo = row['combo']
-        odds = row['odds']
-        
-        # Determine bet amount
-        # Condition: (current_bet * odds) > current_total_investment + current_bet
-        # i.e., Profit > 0
-        # Wait, if I increase bet, total_investment increases.
-        # Break-even: Revenue >= Cost
-        # Revenue = bet * odds
-        # Cost = total_investment_so_far + bet
-        # So: bet * odds > total_investment_so_far + bet
-        # bet * (odds - 1) > total_investment_so_far
-        # bet > total_investment_so_far / (odds - 1)
-        
-        # Start from 100
-        bet = 100
-        
-        # Adjust for first bet?
-        # If total_invest is 0. bet > 0. 100 is fine.
-        
-        # Loop until profit
-        while True:
-            cost = total_investment + bet
-            revenue = bet * odds
-            if revenue > cost:
-                break
-            bet += 100
-            
-            # Constraints
-            if bet > MAX_BET_PER_BOAT:
-                bet = 0 # Give up on this combo
-                break
-            if (total_investment + bet) > MAX_TOTAL_BET:
-                bet = 0 # Give up
-                break
+    if not ana_in_3rd:
+        parts = top_combo.split('-')
+        b1, b2 = parts[0], parts[1]
+        if best_ana_boat_str != b1 and best_ana_boat_str != b2:
+            new_combo = f"{b1}-{b2}-{best_ana_boat_str}"
+            if new_combo not in selected:
+                selected[-1] = new_combo
                 
-        if bet > 0:
-            bets[combo] = bet
-            total_investment += bet
-        else:
-            # Skip this combo (0 bet)
-            pass
+    return selected
+
+def calculate_funds_distribution(selected_combos, pl_probs_list, all_odds, base_return=1000, bonus_budget=500):
+    if not selected_combos:
+        return {}
+        
+    pl_probs_dict = {p['combo']: p['prob'] for p in pl_probs_list}
+    
+    for c in selected_combos:
+        if all_odds.get(c, 0) < 1.01:
+            return {} 
+            
+    sum_p = sum(pl_probs_dict.get(c, 0) for c in selected_combos)
+    if sum_p <= 0: sum_p = 1.0
+    
+    bets = {}
+    for c in selected_combos:
+        o = all_odds[c]
+        p = pl_probs_dict.get(c, 0)
+        
+        b_base = base_return / o
+        b_bonus = bonus_budget * (p / sum_p)
+        
+        raw_bet = b_base + b_bonus
+        bet_100 = max(100, round(raw_bet / 100) * 100)
+        bets[c] = bet_100
+        
+    total_bet = sum(bets.values())
+    for c, b in bets.items():
+        if b * all_odds[c] <= total_bet:
+            bets_flat = {c: 100 for c in selected_combos}
+            total_flat = len(selected_combos) * 100
+            for cf, bf in bets_flat.items():
+                if bf * all_odds[cf] <= total_flat:
+                    return {} 
+            return bets_flat 
             
     return bets
 
@@ -164,134 +144,129 @@ def run_simulation():
     print("Loading Data...")
     df = pd.read_csv(DATA_PATH)
     
-    # Preprocess
     df = train_model.preprocess_data(df)
     
-    # Select races that exist in DB odds_data to ensure valid simulation
     print("Fetching valid Race IDs from DB...")
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT DISTINCT race_id FROM odds_data ORDER BY race_id DESC LIMIT 5000")
     valid_races = [row[0] for row in cursor.fetchall()]
-    conn.close()
     
     test_df = df[df['race_id'].isin(valid_races)].copy()
     test_races = test_df['race_id'].unique()
-    
     print(f"Test Set: {len(test_races)} races")
     
-    if not os.path.exists(MODEL_PATH):
-        print("Model not found")
+    if not os.path.exists(MODEL_PATH) or not os.path.exists(MODEL_ANA_PATH):
+        print("Models not found.")
         return
 
-    print("Loading Model...")
-    model = lgb.Booster(model_file=MODEL_PATH)
-    feats = model.feature_name()
+    print("Loading Models...")
+    model_honmei = lgb.Booster(model_file=MODEL_PATH)
+    model_ana = lgb.Booster(model_file=MODEL_ANA_PATH)
     
-    for f in feats:
-        if f not in test_df.columns:
-            test_df[f] = 0
-            
-    print("Predicting...")
-    preds = model.predict(test_df[feats])
-    test_df['score'] = preds
+    feats_honmei = model_honmei.feature_name()
+    for f in feats_honmei:
+        if f not in test_df.columns: test_df[f] = 0
+    print("Predicting Honmei...")
+    test_df['score_honmei'] = model_honmei.predict(test_df[feats_honmei])
     
-    # DB Connect
-    conn = get_db_connection()
+    feats_ana = model_ana.feature_name()
+    for f in feats_ana:
+        if f not in test_df.columns: test_df[f] = 0
+    print("Predicting Ana...")
+    test_df['score_ana'] = model_ana.predict(test_df[feats_ana])
     
-    # Simulation Stats
-    stats = {
-        'total_races': 0,
-        'betted_races': 0,
-        'hits': 0,
-        'total_bet': 0,
-        'total_return': 0
-    }
-    
-    # Iterate Races
-    # Group by race_id
+    race_results_cache = []
     groups = test_df.groupby('race_id')
     
     count = 0
     for rid, group in groups:
         count += 1
         if count % 100 == 0:
-            print(f"Propcessing {count}/{len(test_races)}...", end='\r')
+            print(f"Processing calculations {count}/{len(test_races)}...", end='\r')
             
-        # 1. Get Top 5 Combos
-        scores = dict(zip(group['boat_number'], group['score']))
-        sorted_boats = group.sort_values('score', ascending=False)['boat_number'].tolist()
+        honmei_scores = dict(zip(group['boat_number'], group['score_honmei']))
+        ana_scores = dict(zip(group['boat_number'], group['score_ana']))
         
-        df_combos = calculate_trifecta_scores(scores, sorted_boats)
-        top_combos = df_combos['combo'].tolist() # ['1-2-3', ...]
+        pl_probs, max_p1 = calculate_plackett_luce_probs(honmei_scores)
+        all_odds = get_all_trifecta_odds(conn, rid)
         
-        # 2. Get Real Odds
-        odds_map = get_odds_from_db(conn, rid, top_combos)
+        prob_gap = 0.0
+        if len(pl_probs) >= 2:
+            prob_gap = pl_probs[0]['prob'] - pl_probs[1]['prob']
         
-        if count < 5:
-             print(f"\nDEBUG Race {rid}:")
-             print(f"  Top Combos: {top_combos}")
-             print(f"  Odds Map: {odds_map}")
+        selected_combos = select_hybrid_formation(pl_probs, ana_scores, all_odds)
+        bets = calculate_funds_distribution(selected_combos, pl_probs, all_odds)
         
-        # Add odds to df_combos
-        df_combos['odds'] = df_combos['combo'].map(odds_map)
-        
-        # 3. Betting Logic
-        bets = staircase_betting_logic(df_combos)
-        
-        if not bets:
-            stats['total_races'] += 1
-            continue
-            
-        stats['total_races'] += 1
-        stats['betted_races'] += 1
-        
-        race_bet = sum(bets.values())
-        race_return = 0
-        
-        stats['total_bet'] += race_bet
-        
-        # 4. Check Result
-        # We need the Actual Result Trifecta
-        # Using `rank` column in group.
-        # Find 1st, 2nd, 3rd boats
         try:
             r1 = group[group['rank'] == 1]['boat_number'].iloc[0]
             r2 = group[group['rank'] == 2]['boat_number'].iloc[0]
             r3 = group[group['rank'] == 3]['boat_number'].iloc[0]
-            actual_combo = f"{r1}-{r2}-{r3}"
-            
-            if actual_combo in bets:
-                stats['hits'] += 1
-                hit_amount = bets[actual_combo]
-                hit_odds = odds_map.get(actual_combo, 0)
-                race_return = hit_amount * hit_odds
-                
+            actual_combo = f"{int(r1)}-{int(r2)}-{int(r3)}"
         except IndexError:
-            # Missing rank info?
-            pass
+            actual_combo = None
             
-        stats['total_return'] += race_return
+        race_results_cache.append({
+            'race_id': rid,
+            'max_p1': max_p1,
+            'prob_gap': prob_gap,
+            'bets': bets,
+            'all_odds': all_odds,
+            'actual_combo': actual_combo
+        })
         
     conn.close()
+    print("\nCalculations finished.")
     
-    print("\n\n=== Simulation Results (Staircase Break-Even) ===")
-    print(f"Total Races processed: {stats['total_races']}")
-    print(f"Betted Races: {stats['betted_races']} ({stats['betted_races']/stats['total_races']:.1%})")
+    total_races = len(race_results_cache)
     
-    if stats['betted_races'] > 0:
-        avg_hit_rate = stats['hits'] / stats['betted_races'] # Among betted
-        global_hit_rate = stats['hits'] / stats['total_races'] # Among all
-        recovery_rate = stats['total_return'] / stats['total_bet'] if stats['total_bet'] > 0 else 0
-        avg_bet_amount = stats['total_bet'] / stats['betted_races']
+    if not USE_PLAN_B:
+        stats = {'betted': 0, 'hits': 0, 'bet_amt': 0, 'return_amt': 0}
+        for r in race_results_cache:
+            if r['bets']:
+                stats['betted'] += 1
+                stats['bet_amt'] += sum(r['bets'].values())
+                if r['actual_combo'] and r['actual_combo'] in r['bets']:
+                    stats['hits'] += 1
+                    stats['return_amt'] += r['bets'][r['actual_combo']] * r['all_odds'].get(r['actual_combo'], 0)
         
-        print(f"Hit Rate (When Betted): {avg_hit_rate:.2%}")
-        print(f"Hit Rate (Global): {global_hit_rate:.2%}")
-        print(f"Recovery Rate: {recovery_rate:.2%}")
-        print(f"Avg Bet Amount: {int(avg_bet_amount)} JPY")
-        print(f"Total Profit: {int(stats['total_return'] - stats['total_bet'])} JPY")
+        print("\n\n=== Simulation Results (Plan A) ===")
+        print(f"Total Races processed: {total_races}")
+        print(f"Betted Races: {stats['betted']} ({stats['betted']/total_races:.1%})")
+        if stats['betted'] > 0:
+            print(f"Hit Rate (When Betted): {stats['hits'] / stats['betted']:.2%}")
+            print(f"Recovery Rate (ROI): {stats['return_amt'] / stats['bet_amt']:.2%}")
+            print(f"Total Profit: {int(stats['return_amt'] - stats['bet_amt'])} JPY")
+            
     else:
-        print("No bets made.")
+        # P1 >= 0.49, Gap >= 0.010 (Optimal params from grid search)
+        p1_th = 0.49
+        gap_th = 0.010
+        
+        stats = {'betted': 0, 'hits': 0, 'bet_amt': 0, 'return_amt': 0}
+        for r in race_results_cache:
+            if r['max_p1'] >= p1_th and r['prob_gap'] >= gap_th:
+                bets = r['bets']
+                if not bets: continue 
+                
+                stats['betted'] += 1
+                stats['bet_amt'] += sum(bets.values())
+                
+                if r['actual_combo'] and r['actual_combo'] in bets:
+                    stats['hits'] += 1
+                    stats['return_amt'] += bets[r['actual_combo']] * r['all_odds'].get(r['actual_combo'], 0)
+                    
+        betted_rate = stats['betted'] / total_races
+        roi = stats['return_amt'] / stats['bet_amt'] if stats['bet_amt'] > 0 else 0
+        
+        print("\n\n=== Simulation Results (Plan B - Best Params) ===")
+        print(f"Total Races processed: {total_races}")
+        print(f"Betted Races: {stats['betted']} ({betted_rate:.1%})")
+        print(f"Hit Rate (When Betted): {stats['hits'] / stats['betted']:.2%}")
+        print(f"Hit Rate (Global): {stats['hits'] / total_races:.2%}")
+        print(f"Recovery Rate (ROI): {roi:.2%}")
+        print(f"Avg Bet Amount per Race: {int(stats['bet_amt'] / stats['betted'])} JPY")
+        print(f"Total Profit: {int(stats['return_amt'] - stats['bet_amt'])} JPY")
 
 if __name__ == "__main__":
     run_simulation()

@@ -22,6 +22,7 @@ if st.sidebar.button("Clear Cache"):
     st.success("Cache Cleared!")
 
 MODEL_HONMEI_PATH = 'model_honmei.txt'
+MODEL_ANA_PATH = 'model_ana.txt'
 
 DATA_DIR = 'app_data'
 HEADERS = {
@@ -58,31 +59,87 @@ class BoatRaceScraper:
         jcd = f"{int(venue_code):02d}"
         url = f"https://www.boatrace.jp/owpc/pc/race/oddstf?rno={race_no}&jcd={jcd}&hd={date_str}"
         soup = BoatRaceScraper.get_soup(url)
-        odds_map = {}
+        odds_data = {}
         if soup:
             try:
-                tables = soup.select("table.is-w495")
-                target_table = None
-                for t in tables:
-                     if "単勝" in t.get_text():
-                         target_table = t
-                         break
+                target_tbody = soup.select_one("tbody.is-p3-0")
+                if not target_tbody:
+                    target_tbody = soup.select_one("div.table1 table tbody")
+                if not target_tbody: return {}
+
+                first_places = []
+                header_row = target_tbody.parent.select_one("thead tr")
+                if header_row:
+                    th_tags = header_row.find_all('th', recursive=False)
+                    for th in th_tags:
+                        if th.has_attr('class') and any('is-boatColor' in c for c in th['class']):
+                            th_text = th.get_text(strip=True)
+                            num_match = re.match(r'^\s*(\d+)', th_text)
+                            if num_match:
+                                num = num_match.group(1)
+                                if num not in first_places:
+                                    first_places.append(num)
+                                    if len(first_places) == 6: break
                 
-                if target_table:
-                     rows = target_table.select("tbody tr")
-                     for row in rows:
-                         tds = row.select("td")
-                         if len(tds) >= 3:
-                             try:
-                                 bn_txt = tds[0].get_text(strip=True)
-                                 bn = int(bn_txt)
-                                 val_txt = tds[2].get_text(strip=True)
-                                 val = float(val_txt)
-                                 if val > 0:
-                                     odds_map[bn] = 1.0 / val
-                             except: pass
+                if len(first_places) != 6:
+                     first_places = [str(i) for i in range(1, 7)]
+
+                rows = target_tbody.find_all('tr', recursive=False)
+                num_cols = len(first_places)
+                current_boat2 = [''] * num_cols
+                rowspan_remaining = [0] * num_cols
+
+                for r_idx, row in enumerate(rows):
+                    cells = row.find_all('td', recursive=False)
+                    cell_ptr = 0
+                    for col_idx in range(num_cols):
+                        first_boat = first_places[col_idx]
+                        boat2 = ""
+                        boat3 = ""
+                        odds_val = None
+                        
+                        try:
+                            if rowspan_remaining[col_idx] > 0:
+                                rowspan_remaining[col_idx] -= 1
+                                if cell_ptr + 1 < len(cells):
+                                    boat2 = current_boat2[col_idx]
+                                    boat3 = cells[cell_ptr].get_text(strip=True)
+                                    odds_txt = cells[cell_ptr + 1].get_text(strip=True).replace('倍', '').replace(',', '')
+                                    try: odds_val = float(odds_txt)
+                                    except: pass
+                                    cell_ptr += 2
+                                else: continue
+                            else:
+                                if cell_ptr >= len(cells): break
+                                current_cell = cells[cell_ptr]
+                                if current_cell.has_attr('rowspan'):
+                                    boat2_text = current_cell.get_text(strip=True)
+                                    if boat2_text.isdigit():
+                                        current_boat2[col_idx] = boat2_text
+                                        boat2 = boat2_text
+                                        try: rowspan_remaining[col_idx] = max(0, int(current_cell['rowspan']) - 1)
+                                        except: rowspan_remaining[col_idx] = 0
+                                        if cell_ptr + 2 < len(cells):
+                                            boat3 = cells[cell_ptr+1].get_text(strip=True)
+                                            odds_txt = cells[cell_ptr+2].get_text(strip=True).replace('倍', '').replace(',', '')
+                                            try: odds_val = float(odds_txt)
+                                            except: pass
+                                            cell_ptr += 3
+                                        else:
+                                            cell_ptr += 1
+                                            continue
+                                    else:
+                                        cell_ptr += 1
+                                        continue
+                                else:
+                                    cell_ptr +=1
+                                    continue
+                            
+                            if boat2.isdigit() and boat3.isdigit() and first_boat != boat2 and first_boat != boat3 and boat2 != boat3 and odds_val is not None and odds_val > 0:
+                                odds_data[f"{first_boat}-{boat2}-{boat3}"] = odds_val
+                        except: pass
             except: pass
-        return odds_map
+        return odds_data
 
     @staticmethod
     def get_race_data(date_str, venue_code, race_no):
@@ -251,8 +308,8 @@ class BoatRaceScraper:
                     'branch': branch,
                     'weight': weight,
                     'nat_win_rate': nat_win_rate,
-                    'local_win_rate': local_win_rate,
-                    'syn_win_rate': odds_map.get(bn, 0.0)
+                    'local_win_rate': local_win_rate
+                    # Remove syn_win_rate as it was for Tansho and we now fetch 3-ren-tan later
                 }
                 rows.append(row)
         except Exception as e:
@@ -524,17 +581,91 @@ class FeatureEngineer:
         
         return candidates
 
-def format_trifecta_box(boats):
-    return f"{boats[0]}, {boats[1]}, {boats[2]}"
-
-def calculate_trifecta_scores(scores, boats):
+def calculate_plackett_luce_probs(honmei_scores_dict):
+    boats = list(honmei_scores_dict.keys())
+    scores = np.array([honmei_scores_dict[b] for b in boats])
+    max_score = np.max(scores)
+    exp_scores = np.exp(scores - max_score)
+    p1 = exp_scores / np.sum(exp_scores)
+    p1_dict = {boats[i]: p1[i] for i in range(len(boats))}
+    
     import itertools
     combos = list(itertools.permutations(boats, 3))
-    c_list = []
+    pl_probs = []
     for c in combos:
-        s = (scores[c[0]] * 4) + (scores[c[1]] * 2) + (scores[c[2]] * 1)
-        c_list.append({'combo': f"{c[0]}-{c[1]}-{c[2]}", 'val': s})
-    return pd.DataFrame(c_list).sort_values('val', ascending=False)
+        b1, b2, b3 = c
+        prob1 = p1_dict[b1]
+        denom2 = 1.0 - p1_dict[b1]
+        if denom2 <= 0: denom2 = 1e-9
+        prob2 = p1_dict[b2] / denom2
+        denom3 = 1.0 - p1_dict[b1] - p1_dict[b2]
+        if denom3 <= 0: denom3 = 1e-9
+        prob3 = p1_dict[b3] / denom3
+        total_prob = prob1 * prob2 * prob3
+        combo_str = f"{b1}-{b2}-{b3}"
+        pl_probs.append({'combo': combo_str, 'prob': total_prob})
+        
+    pl_probs.sort(key=lambda x: x['prob'], reverse=True)
+    
+    # フィルター指標用
+    p1_sorted = sorted(p1_dict.items(), key=lambda x: x[1], reverse=True)
+    max_p1 = float(p1_sorted[0][1])
+    prob_gap = float(pl_probs[0]['prob'] - pl_probs[1]['prob']) if len(pl_probs) >= 2 else 0.0
+    
+    return pl_probs, max_p1, prob_gap
+
+def select_hybrid_formation_plan_b(pl_probs, ana_scores_dict, all_odds):
+    if not pl_probs or not all_odds: return []
+    top_combo = pl_probs[0]['combo']
+    top_odds = all_odds.get(top_combo, 0)
+    if top_odds < 1: return []
+    
+    import math
+    N = int(min(8, math.floor(top_odds)))
+    if N < 1: return []
+    
+    selected = [p['combo'] for p in pl_probs[:N]]
+    best_ana_boat = max(ana_scores_dict, key=ana_scores_dict.get)
+    best_ana_boat_str = str(best_ana_boat)
+    
+    ana_in_3rd = any(c.split('-')[2] == best_ana_boat_str for c in selected)
+    if not ana_in_3rd:
+        parts = top_combo.split('-')
+        b1, b2 = parts[0], parts[1]
+        if best_ana_boat_str != b1 and best_ana_boat_str != b2:
+            new_combo = f"{b1}-{b2}-{best_ana_boat_str}"
+            if new_combo not in selected:
+                selected[-1] = new_combo
+    return selected
+
+def calculate_funds_distribution(selected_combos, pl_probs_list, all_odds, base_return, bonus_budget):
+    if not selected_combos: return {}
+    pl_probs_dict = {p['combo']: p['prob'] for p in pl_probs_list}
+    for c in selected_combos:
+        if all_odds.get(c, 0) < 1.01: return {}
+    
+    sum_p = sum(pl_probs_dict.get(c, 0) for c in selected_combos)
+    if sum_p <= 0: sum_p = 1.0
+    
+    bets = {}
+    for c in selected_combos:
+        o = all_odds[c]
+        p = pl_probs_dict.get(c, 0)
+        b_base = base_return / o
+        b_bonus = bonus_budget * (p / sum_p)
+        raw_bet = b_base + b_bonus
+        bet_100 = max(100, round(raw_bet / 100) * 100)
+        bets[c] = bet_100
+        
+    total_bet = sum(bets.values())
+    for c, b in bets.items():
+        if b * all_odds[c] <= total_bet:
+            bets_flat = {c: 100 for c in selected_combos}
+            total_flat = len(selected_combos) * 100
+            for cf, bf in bets_flat.items():
+                if bf * all_odds[cf] <= total_flat: return {}
+            return bets_flat
+    return bets
 
 # --- 3. Main App ---
 st.title("🚤 BoatRace AI Dual Strategy System")
@@ -554,6 +685,10 @@ venue_name = venue_map[venue_code]
 race_no = st.sidebar.selectbox("Race No", range(1, 13))
 
 debug_mode = st.sidebar.checkbox("Show Debug Info", value=False)
+st.sidebar.markdown("---")
+st.sidebar.markdown("**💰 Budget Settings**")
+base_budget = st.sidebar.number_input("Base Budget (Flat Payout)", min_value=0, max_value=10000, value=1000, step=100)
+bonus_budget = st.sidebar.number_input("Bonus Budget (EV Boost)", min_value=0, max_value=10000, value=500, step=100)
 
 if st.button("Analyze Race", type="primary"):
     st.session_state['run_analysis'] = True
@@ -579,97 +714,100 @@ if st.session_state.get('run_analysis'):
             df_feat = FeatureEngineer.process(df_race, props['v_name'], debug_mode=debug_mode)
         
         # --- Prediction ---
-        st.subheader("🤖 AI Prediction (3-Ren Tan)")
+        st.subheader("🤖 AI Prediction (3-Ren Tan - Plan B)")
         
-        if os.path.exists(MODEL_HONMEI_PATH):
+        if os.path.exists(MODEL_HONMEI_PATH) and os.path.exists(MODEL_ANA_PATH):
             try:
                 model_h = lgb.Booster(model_file=MODEL_HONMEI_PATH)
+                model_a = lgb.Booster(model_file=MODEL_ANA_PATH)
+                
                 # Robust Feature Selection: Get exact features from model
                 feats_h = model_h.feature_name()
+                feats_a = model_a.feature_name()
                 
-                # Ensure all features exist
-                # Ensure all features exist and match types
-                # Hardcoded list of potential categorical features (based on debugging)
                 known_cats = ['branch', 'wind_direction', 'venue_code_y', 'class', 'racer_class']
                 
                 for f in feats_h:
                     if f not in df_feat.columns:
-                        # Missing Feature Handling
                         if f in known_cats:
-                            df_feat[f] = '00' # Dummy string
+                            df_feat[f] = '00' 
                             df_feat[f] = df_feat[f].astype('category')
                         else:
                             df_feat[f] = 0.0
                     else:
-                        # Existing Feature Handling - Enforce Type
+                        if f in known_cats and not pd.api.types.is_categorical_dtype(df_feat[f]):
+                            df_feat[f] = df_feat[f].astype(str).astype('category')
+                            
+                for f in feats_a:
+                    if f not in df_feat.columns:
                         if f in known_cats:
-                            # Force to Category if not already
-                            if not pd.api.types.is_categorical_dtype(df_feat[f]):
-                                df_feat[f] = df_feat[f].astype(str).astype('category')
+                            df_feat[f] = '00' 
+                            df_feat[f] = df_feat[f].astype('category')
+                        else:
+                            df_feat[f] = 0.0
+                    else:
+                        if f in known_cats and not pd.api.types.is_categorical_dtype(df_feat[f]):
+                            df_feat[f] = df_feat[f].astype(str).astype('category')
 
                 preds_h = model_h.predict(df_feat[feats_h])
+                preds_a = model_a.predict(df_feat[feats_a])
+                
                 df_feat['score_honmei'] = preds_h
+                df_feat['score_ana'] = preds_a
                 
-                # --- Hybrid Strategy Logic ---
-                TH_HIGH = 1.5347
-                TH_LOW = 1.2923
-                score_std = df_feat['score_honmei'].std()
+                scores_h = dict(zip(df_feat['boat_number'], df_feat['score_honmei']))
+                scores_a = dict(zip(df_feat['boat_number'], df_feat['score_ana']))
                 
-                mode = "Skip"
-                if score_std >= TH_HIGH: mode = "Enjoy"
-                elif score_std <= TH_LOW: mode = "Chaos"
+                pl_probs, max_p1, prob_gap = calculate_plackett_luce_probs(scores_h)
+                
+                # Get live odds for calculation
+                # We already have syn_win_rate in df_feat, but we need all 120 odds
+                # The get_odds method in scraper was used inside get_race_data and returned odds_map.
+                # However, get_odds currently returns map with keys as INT (e.g. 123) or just Tansho.
+                # Wait, BoatRaceScraper.get_odds parses "単勝" (Win). We need 3-Ren Tan odds!
+                # Actually, in simulate_betting.py, get_all_trifecta_odds fetches from DB.
+                # Since this is a live app, we need to fetch live 3-Ren Tan odds.
+                # But to avoid complex scraping right here, we can fallback to using prediction or just dummy if live odds scraper for trifecta is not implemented.
+                # I will implement a quick odds check or just show the combos if we can't scrape them live easily.
                 
                 st.markdown("---")
-                st.write(f"**Race Score Std:** `{score_std:.4f}`")
+                st.write(f"**Max 1st Prob (P1):** `{max_p1:.4f}` | **Prob Gap:** `{prob_gap:.4f}`")
                 
-                top_n = 0
-                filter_text = ""
-                
-                if mode == "Enjoy":
-                    st.success("🛡️ **Enjoy Mode** (High Confidence)")
-                    st.markdown("**Strategy:** Bet Top 4 (No Odds Filter)")
-                    top_n = 4
-                elif mode == "Chaos":
-                    st.error("🚀 **Chaos Mode** (Deep Confusion)")
-                    st.markdown("**Strategy:** Bet Top 6 (⚠️ **Only Odds >= 30.0**)")
-                    filter_text = " (Check Live Odds!)"
-                    top_n = 6
+                # Plan B Filter Thresholds
+                if max_p1 >= 0.49 and prob_gap >= 0.010:
+                    st.success("🎯 **Target Race (Plan B)** - Optimal conditions met.")
                 else:
-                    st.warning("☕ **Skip Mode** (Yield Low)")
-                    st.write("Recommendation: Watch & Relax")
-                    top_n = 0
-
-                # Formulate Predictions
-                scores_h = dict(zip(df_feat['boat_number'], df_feat['score_honmei']))
-                sorted_boats_h = df_feat.sort_values('score_honmei', ascending=False)['boat_number'].tolist()
+                    st.warning("☕ **Skip (Ken)** - Does not meet Plan B confidence thresholds.")
                 
-                # Use Top 4 boats for permutation base
-                cand_boats = sorted_boats_h[:4] 
+                # Dynamic N and Hybrid Formation
+                # We have the live odds!
+                # all_odds is stored in df_race internally, wait, df_race didn't save all_odds directly.
+                # Let's fetch it again quickly or we can just fetch it here.
+                all_odds = BoatRaceScraper.get_odds(props['date'], props['venue'], props['race'])
                 
-                import itertools
-                combos = list(itertools.permutations(cand_boats, 3))
-                c_list = []
-                for c in combos:
-                    # Sum Score
-                    s = sum(scores_h[b] for b in c)
-                    c_list.append({'combo': f"{c[0]}-{c[1]}-{c[2]}", 'val': s})
+                selected_combos = select_hybrid_formation_plan_b(pl_probs, scores_a, all_odds)
+                bets = calculate_funds_distribution(selected_combos, pl_probs, all_odds, base_budget, bonus_budget)
                 
-                df_c_h = pd.DataFrame(c_list).sort_values('val', ascending=False)
-                
-                if top_n > 0:
-                    st.markdown(f"#### Recommended Buying List (Top {top_n}){filter_text}")
-                    st.dataframe(df_c_h.head(top_n), hide_index=True)
-                    st.success(f"Best Pick: **{df_c_h.iloc[0]['combo']}**")
+                if not selected_combos:
+                    st.info("No combinations selected (Odds too low).")
                 else:
-                    st.dataframe(df_c_h.head(5), hide_index=True) # Show top 5 anyway for reference?
-                    # "表示なし" was requested for Skip.
-                    # But standard practice is to show prediction even if Skip recommended, just dim it.
-                    # User prompt: "表示なし".
-                    # I will hide the buying list. But maybe show "Best" quietly?
-                    # I'll hide specific recommendations.
-                    st.caption("Predictions available but strategy suggests Skipping.")
+                    st.markdown("#### Plan B Buying List (Funds Distribution)")
+                    st.info("📊 Live 3-Ren Tan odds integrated.")
+                    
+                    df_bets = pd.DataFrame([
+                        {
+                            'Combo': c,
+                            'PL Prob': f"{next(p['prob'] for p in pl_probs if p['combo'] == c):.2%}",
+                            'Live Odds': f"{all_odds.get(c, 0.0):.1f}",
+                            'Bet Amount (JPY)': bets.get(c, 100),
+                            'Est. Return': int(bets.get(c, 100) * all_odds.get(c, 0.0))
+                        }
+                        for c in selected_combos
+                    ])
+                    st.dataframe(df_bets, hide_index=True)
+                    st.success(f"**Total Investment:** {sum(bets.values())} JPY")
                 
             except Exception as e:
                 st.error(f"Prediction Error: {e}")
         else:
-            st.warning("Model file not found. Please train the model first.")
+            st.warning("Model files not found. Please ensure model_honmei.txt and model_ana.txt exist.")
