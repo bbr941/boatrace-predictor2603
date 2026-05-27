@@ -130,16 +130,6 @@ def calculate_funds_distribution(selected_combos, pl_probs_list, all_odds, base_
         bet_100 = max(100, round(raw_bet / 100) * 100)
         bets[c] = bet_100
         
-    total_bet = sum(bets.values())
-    for c, b in bets.items():
-        if b * all_odds[c] <= total_bet:
-            bets_flat = {c: 100 for c in selected_combos}
-            total_flat = len(selected_combos) * 100
-            for cf, bf in bets_flat.items():
-                if bf * all_odds[cf] <= total_flat:
-                    return {} 
-            return bets_flat 
-            
     return bets
 
 def run_simulation():
@@ -151,7 +141,7 @@ def run_simulation():
     print("Fetching valid Race IDs from DB...")
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT DISTINCT race_id FROM odds_data ORDER BY race_id DESC LIMIT 10")
+    cursor.execute("SELECT DISTINCT race_id FROM odds_data ORDER BY race_id DESC LIMIT 5000")
     valid_races = [row[0] for row in cursor.fetchall()]
     
     test_df = df[df['race_id'].isin(valid_races)].copy()

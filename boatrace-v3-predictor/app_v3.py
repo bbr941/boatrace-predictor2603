@@ -356,14 +356,6 @@ def calculate_funds_distribution(selected_combos, pl_probs_list, all_odds, base_
         bet_100 = max(100, round(raw_bet / 100) * 100)
         bets[c] = bet_100
         
-    total_bet = sum(bets.values())
-    for c, b in bets.items():
-        if b * all_odds[c] <= total_bet:
-            bets_flat = {c: 100 for c in selected_combos}
-            total_flat = len(selected_combos) * 100
-            for cf, bf in bets_flat.items():
-                if bf * all_odds[cf] <= total_flat: return {}
-            return bets_flat
     return bets
 
 def get_race_selection():
@@ -570,6 +562,16 @@ def main():
                 # フォーメーション表示の追加
                 formation_str = format_formations(selected_combos)
                 st.success(f"**【推奨フォーメーション】** {formation_str}")
+                
+                ev_sum = 0
+                for c in selected_combos:
+                    p = next((x['prob'] for x in pl_probs if x['combo'] == c), 0)
+                    o = all_odds.get(c, 0)
+                    ev_sum += p * o
+                
+                if prob_gap >= 0.0492:
+                    st.warning(f"🔥 **勝負掛けチャンス（上位20%特化条件）**\n1位・2位の確率差（prob_gap: `{prob_gap:.4f}`）が基準値の0.0492以上です！勝負レースとして期待できます。")
+                
                 
                 df_bets = pd.DataFrame([
                     {

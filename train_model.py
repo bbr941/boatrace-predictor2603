@@ -201,6 +201,23 @@ def add_advanced_features(df):
             df['venue_frame_win_rate'] = 0.0
     else:
         df['venue_frame_win_rate'] = 0.0
+        
+    # 6. Rank-based features
+    if 'racer_rank' in df.columns:
+        rank_map = {'A1': 4, 'A2': 3, 'B1': 2, 'B2': 1}
+        df['rank_numeric'] = df['racer_rank'].map(rank_map).fillna(0)
+        
+        # level_adjusted_win_rate
+        if 'nat_win_rate' in df.columns:
+            df['level_adjusted_win_rate'] = df['nat_win_rate'] * df['rank_numeric']
+            
+            # rank_skill_gap
+            rank_means = df.groupby('racer_rank')['nat_win_rate'].transform('mean')
+            df['rank_skill_gap'] = df['nat_win_rate'] - rank_means
+            df['rank_skill_gap'] = df['rank_skill_gap'].fillna(0.0)
+        else:
+            df['level_adjusted_win_rate'] = 0.0
+            df['rank_skill_gap'] = 0.0
 
     return df
 
@@ -211,6 +228,7 @@ def get_features(df, mode='honmei'):
         'race_id', 'boat_number', 'racer_id', 'rank', 'relevance',
         'race_date', # Date usually not a direct feature unless processed
         'venue_name', # captured by venue_code or category
+        'racer_rank', # raw string, replaced by rank_numeric
         'prior_results', # Raw string
         'weight_for_loss', # Internal column
         'pred_score', # artifact

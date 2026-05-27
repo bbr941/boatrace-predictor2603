@@ -36,6 +36,7 @@ def load_base_data(conn, limit=None):
         re.prior_results,
         re.weight,
         re.branch,
+        re.racer_rank,
         
         -- レース結果 (rank) from results
         res.finish_order as rank,
@@ -133,14 +134,19 @@ def load_synthetic_odds(conn, race_ids):
     """
     print("Calculating Synthetic Odds...")
     # 対象レースのみ取得
-    ids_str = "'" + "','".join(race_ids) + "'"
-    query = f"""
-    SELECT race_id, combination, odds_1min 
-    FROM odds_data 
-    WHERE race_id IN ({ids_str})
-    """
+    if len(race_ids) > 10000:
+        query = "SELECT race_id, combination, odds_1min FROM odds_data"
+    else:
+        ids_str = "'" + "','".join(race_ids) + "'"
+        query = f"""
+        SELECT race_id, combination, odds_1min 
+        FROM odds_data 
+        WHERE race_id IN ({ids_str})
+        """
     try:
         df_odds = pd.read_sql(query, conn)
+        if len(race_ids) > 10000:
+            df_odds = df_odds[df_odds['race_id'].isin(race_ids)]
     except:
         return None # オッズデータがない場合
 
