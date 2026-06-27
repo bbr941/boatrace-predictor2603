@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import lightgbm as lgb
 import streamlit as st
+import re
 
 # --- Path Adjustment (Must be at the very top) ---
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -67,8 +68,8 @@ def add_advanced_features(df):
     # Inner ST Gap Corrected
     df = df.sort_values(['race_id', 'boat_number'])
     prev_sts = df['corrected_st'].shift(1)
-    df['inner_st_gap_corrected'] = df['corrected_st'] - prev_sts
-    df.loc[df['boat_number'] == 1, 'inner_st_gap_corrected'] = 0.0
+    df['inner_st_gap_corrected'] = (df['corrected_st'] - prev_sts).fillna(0.0)
+    df.loc[df.index[0], 'inner_st_gap_corrected'] = 0.0
     
     # 2. Motor Gap
     if 'motor_rate' in df.columns and 'exhibition_time' in df.columns:
@@ -90,14 +91,14 @@ def add_advanced_features(df):
         df['my_sashi_rate'] = df['sashi_count'] / (df['course_run_count'] + 1.0)
         df['my_makuri_rate'] = df['makuri_count'] / (df['course_run_count'] + 1.0)
         
-        inner_nige_rate = df['my_nige_rate'].shift(1)
+        inner_nige_rate = df['my_nige_rate'].shift(1).fillna(1.0)
         df['sashi_potential'] = df['my_sashi_rate'] / (inner_nige_rate + 0.01)
-        df.loc[df['boat_number'] == 1, 'sashi_potential'] = 0
+        df.loc[df.index[0], 'sashi_potential'] = 0
         
         df['st_rank'] = df.groupby('race_id')['corrected_st'].rank(ascending=True)
-        inner_st_rank = df['st_rank'].shift(1)
+        inner_st_rank = df['st_rank'].shift(1).fillna(1.0)
         df['makuri_potential'] = df['my_makuri_rate'] * inner_st_rank
-        df.loc[df['boat_number'] == 1, 'makuri_potential'] = 0
+        df.loc[df.index[0], 'makuri_potential'] = 0
     else:
         df['sashi_potential'] = 0.0
         df['makuri_potential'] = 0.0
@@ -215,9 +216,9 @@ class FeatureEngineer:
         df = df.sort_values('pred_course')
         st_col = 'corrected_st' if 'corrected_st' in df.columns else 'exhibition_start_timing'
         
-        df['inner_st'] = df[st_col].shift(1).fillna(0)
+        df['inner_st'] = df[st_col].shift(1).fillna(df[st_col])
         df['inner_st_gap'] = df[st_col] - df['inner_st']
-        df['outer_st'] = df[st_col].shift(-1).fillna(0)
+        df['outer_st'] = df[st_col].shift(-1).fillna(df[st_col])
         avg_neighbor = (df['inner_st'] + df['outer_st']) / 2
         df['slit_formation'] = df[st_col] - avg_neighbor
 
@@ -452,152 +453,18 @@ def main():
             rows = []
             for idx, row in entries.iterrows():
                 bn = int(row['boat_number'])
+                
+                # --- 欠場判定ロジック ---
+                raw_ex_time = before.get('exhibition_times', {}).get(bn)
+                try:
+                    ex_time_val = float(raw_ex_time) if raw_ex_time else 0.0
+                except (ValueError, TypeError):
+                    ex_time_val = 0.0
+
+                if ex_time_val <= 0.0:
+                    st.warning(f"⚠️ {bn}号艇は欠場（展示タイムなし）のため予測から除外します。")
+                    continue
+                # ----------------------
+                
                 rows.append({
-                    'race_id': f"{race_info['date']}_{race_info['place']}_{race_info['race_no']}",
-                    'boat_number': bn,
-                    'racer_id': int(row['racer_id']) if pd.notna(row['racer_id']) else 9999,
-                    'motor_rate': float(row['motor_rate']) if pd.notna(row['motor_rate']) else 30.0,
-                    'boat_rate': float(row['boat_rate']) if pd.notna(row['boat_rate']) else 30.0,
-                    'exhibition_time': float(before['exhibition_times'].get(bn, 6.8)),
-                    'exhibition_start_timing': float(before['start_times'].get(bn, 0.20)),
-                    'pred_course': int(before['exhibition_entry_courses'].get(bn, bn)),
-                    'wind_direction': before.get('wind_direction', 0),
-                    'wind_speed': float(before.get('wind_speed', 0.0)) if before.get('wind_speed') is not None else 0.0,
-                    'wave_height': float(before.get('wave_height', 0.0)) if before.get('wave_height') is not None else 0.0,
-                    'prior_results': row.get('prior_results', ''),
-                    'branch': row.get('branch', 'Unknown'),
-                    'weight': float(row['weight']) if pd.notna(row['weight']) else 52.0,
-                    'nat_win_rate': float(row['nat_win_rate']) if pd.notna(row['nat_win_rate']) else 0.0,
-                    'local_win_rate': float(row['loc_win_rate']) if pd.notna(row['loc_win_rate']) else 0.0
-                })
-            df_race = pd.DataFrame(rows)
-            
-            df_feat = FeatureEngineer.process(df_race, venue_name, debug_mode=debug_mode)
-            
-            # Predict
-            model_h = models['honmei']
-            model_a = models['ana']
-            
-            feats_h = model_h.feature_name()
-            feats_a = model_a.feature_name()
-            
-            known_cats = ['branch', 'wind_direction', 'venue_code_y', 'class', 'racer_class']
-            
-            for f in feats_h:
-                if f not in df_feat.columns:
-                    if f in known_cats:
-                        df_feat[f] = '00' 
-                        df_feat[f] = df_feat[f].astype('category')
-                    else:
-                        df_feat[f] = 0.0
-                else:
-                    if f in known_cats and not pd.api.types.is_categorical_dtype(df_feat[f]):
-                        df_feat[f] = df_feat[f].astype(str).astype('category')
-                        
-            for f in feats_a:
-                if f not in df_feat.columns:
-                    if f in known_cats:
-                        df_feat[f] = '00' 
-                        df_feat[f] = df_feat[f].astype('category')
-                    else:
-                        df_feat[f] = 0.0
-                else:
-                    if f in known_cats and not pd.api.types.is_categorical_dtype(df_feat[f]):
-                        df_feat[f] = df_feat[f].astype(str).astype('category')
-
-            preds_h = model_h.predict(df_feat[feats_h])
-            preds_a = model_a.predict(df_feat[feats_a])
-            
-            df_feat['score_honmei'] = preds_h
-            df_feat['score_ana'] = preds_a
-            
-            scores_h = dict(zip(df_feat['boat_number'], df_feat['score_honmei']))
-            scores_a = dict(zip(df_feat['boat_number'], df_feat['score_ana']))
-            
-            pl_probs, max_p1, prob_gap = calculate_plackett_luce_probs(scores_h)
-            
-            st.subheader("📊 Race Inference Analytics (参戦／見 判定)")
-            
-            p1_target = 0.49
-            gap_target = 0.010
-            
-            p1_diff = max_p1 - p1_target
-            gap_diff = prob_gap - gap_target
-            
-            p1_pass_ratio = min(1.0, max_p1 / p1_target)
-            gap_pass_ratio = min(1.0, prob_gap / gap_target)
-            skip_rec_deg = (1.0 - (p1_pass_ratio + gap_pass_ratio) / 2.0) * 100
-            
-            if skip_rec_deg == 0:
-                deg_str = "🔵 **0% (条件クリア！参戦推奨)**"
-            elif skip_rec_deg < 15:
-                deg_str = f"🟡 **{skip_rec_deg:.1f}% (やや波乱含み・見推奨度：低)**"
-            elif skip_rec_deg < 30:
-                deg_str = f"🟠 **{skip_rec_deg:.1f}% (リスクあり・見推奨度：中)**"
-            elif skip_rec_deg < 50:
-                deg_str = f"🔴 **{skip_rec_deg:.1f}% (リスク高め・見推奨度：高)**"
-            else:
-                deg_str = f"☠️ **{skip_rec_deg:.1f}% (危険レース・完全見推奨)**"
-
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown(f"**Max 1st Prob (P1)**\n- 実測値: `{max_p1:.4f}`\n- 基準値: `{p1_target:.4f}`\n- 差異: `{p1_diff:+.4f}`")
-            with col2:
-                st.markdown(f"**Prob Gap**\n- 実測値: `{prob_gap:.4f}`\n- 基準値: `{gap_target:.4f}`\n- 差異: `{gap_diff:+.4f}`")
-            
-            st.markdown(f"### ☕ 見（ケン）推奨度: {deg_str}")
-
-
-            
-            selected_combos = select_hybrid_formation_plan_b(pl_probs, scores_a, all_odds)
-            bets = calculate_funds_distribution(selected_combos, pl_probs, all_odds, base_budget, bonus_budget)
-            
-            st.markdown("---")
-            if not selected_combos:
-                st.info("No combinations selected (Odds too low or no options meet constraints).")
-            else:
-                st.markdown("### 🎯 Recommended Buying List")
-
-                
-                # フォーメーション表示の追加
-                formation_str = format_formations(selected_combos)
-                st.success(f"**【推奨フォーメーション】** {formation_str}")
-                
-                ev_sum = 0
-                for c in selected_combos:
-                    p = next((x['prob'] for x in pl_probs if x['combo'] == c), 0)
-                    o = all_odds.get(c, 0)
-                    ev_sum += p * o
-                
-                if prob_gap >= 0.0492:
-                    st.warning(f"🔥 **勝負掛けチャンス（上位20%特化条件）**\n1位・2位の確率差（prob_gap: `{prob_gap:.4f}`）が基準値の0.0492以上です！勝負レースとして期待できます。")
-                
-                
-                df_bets = pd.DataFrame([
-                    {
-                        'Combo': c,
-                        'PL Prob': f"{next(p['prob'] for p in pl_probs if p['combo'] == c):.2%}",
-                        'Live Odds': f"{all_odds.get(c, 0.0):.1f}",
-                        'Bet Amount (JPY)': bets.get(c, 100),
-                        'Est. Return': int(bets.get(c, 100) * all_odds.get(c, 0.0))
-                    }
-                    for c in selected_combos
-                ])
-                st.dataframe(df_bets, hide_index=True)
-                st.success(f"**Total Investment:** {sum(bets.values())} JPY")
-            
-            if debug_mode:
-                with st.expander("🛠 Raw Data Debug View"):
-                    st.write(f"**Engineered Features:**")
-                    st.dataframe(df_feat)
-                    st.write("**Top Plackett-Luce Probabilities:**")
-                    st.write(pl_probs[:10])
-                    
-        except Exception as e:
-            st.error(f"Prediction Error: {e}")
-            st.code(traceback.format_exc())
-            logger.error(f"Prediction flow failed: {e}")
-            return
-
-if __name__ == "__main__":
-    main()
+                    'race_id': f"{race_info['date
