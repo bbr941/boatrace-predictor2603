@@ -1,0 +1,10 @@
+{
+    "calibration_method": "platt",
+    "d2": 0.4,
+    "d3": 0.6,
+    "p1_th": 0.49,
+    "gap_th": 0.01,
+    "optimized_metric": "roi",
+    "roi": 1.0213,
+    "hit_rate": 0.5447
+}

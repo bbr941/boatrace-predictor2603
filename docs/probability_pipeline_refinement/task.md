@@ -1,0 +1,24 @@
+# タスクリスト: ボートレース推論パイプライン精緻化
+
+- [x] **1. 確率キャリブレーション共通モジュールの作成 (`probability_calibration.py`)** <!-- id: 0 -->
+  - [x] Platt Scaling / Isotonic Regression / Softmax のキャリブレーションクラス実装
+  - [x] 過去データからの学習機能・保存/読込機能・フォールバック機能の実装
+  - [x] 単体動作検証とLog Loss / Brier Score評価
+- [x] **2. Benterモデル（Damping Factor）による確率展開の実装** <!-- id: 1 -->
+  - [x] `calculate_benter_probs` 関数の実装（$d_2, d_3$ 減衰パラメーター対応）
+  - [x] 120通りの確率合計が $1.0$ となることの数理的検証
+- [x] **3. 最適パラメーター探索スクリプトの作成 (`optimize_probability.py`)** <!-- id: 2 -->
+  - [x] `boatrace.db` からの確定着順・オッズ取得処理
+  - [x] Optunaによる $d_2, d_3$ およびキャリブレーション手法の探索エンジン実装
+  - [x] 目的関数（実ROI最大化 / 3連単Log Loss最小化）の切り替え対応
+  - [x] 最適パラメーター設定ファイル（`app_data/probability_config.json`）の保存機能
+- [x] **4. `simulate_betting.py` への統合とバックテスト検証** <!-- id: 3 -->
+  - [x] キャリブレーション & Benterモデルの組み込み
+  - [x] 既存フォーメーション（Plan B）および資金配分との互換性維持
+  - [x] 5,000レースでのバックテスト比較実行
+- [x] **5. `app_boatrace.py`（Streamlitアプリ）への統合** <!-- id: 4 -->
+  - [x] 推論ロジックへのキャリブレーション & Benterモデル適用
+  - [x] UI設定（サイドバーでのパラメーター確認・調整機能）
+  - [x] アプリ動作構文検証
+- [x] **6. 成果ドキュメントの保存 (`docs/probability_pipeline_refinement/`)** <!-- id: 5 -->
+  - [x] `walkthrough.md` の作成と結果レポートまとめ

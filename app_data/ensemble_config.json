@@ -1,0 +1,11 @@
+{
+    "blend_space": "logit",
+    "best_w_residual": 1.0,
+    "best_w_honmei": 0.0,
+    "roi": 0.7410948525129242,
+    "profit": -5023200.0,
+    "hit_rate": 0.021983512365725707,
+    "betted_races": 4003,
+    "mdd_amt": 5715770.0,
+    "sharpe": -0.042217079531257314
+}
