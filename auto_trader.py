@@ -5,6 +5,7 @@ auto_trader.py
 - 各レースの「締切5分前」に自動トリガー実行
 - 黄金ベースライン（Cluster 1除外 + Gatekeeper P1 >= 0.7438 + Extractor/Benter + Strict Optimizer）
 - 投資GOサイン検知時のみ Discord Webhook へリッチ Embed 通知送信
+- 開発・検証用 モックテストモード (--mock) 完備
 """
 
 import os
@@ -14,6 +15,7 @@ import datetime
 import re
 import logging
 import argparse
+import itertools
 from typing import Dict, List, Tuple, Optional, Any
 
 import requests
@@ -76,25 +78,20 @@ DEFAULT_GATEKEEPER_TH = 0.7438    # Gatekeeper 黄金ベースライン (85th%)
 
 
 # =====================================================================
-# 1. スクレイパー & 特徴量生成モジュール (スタンドアロン実装)
+# 1. スクレイパー & 特徴量生成モジュール
 # =====================================================================
 
 class BoatRaceScraper:
     @staticmethod
     def get_soup(url: str) -> Optional[BeautifulSoup]:
-        max_retries = 2
-        for attempt in range(max_retries):
-            try:
-                resp = requests.get(url, headers=HEADERS, timeout=8)
-                resp.raise_for_status()
-                resp.encoding = 'utf-8'
-                return BeautifulSoup(resp.text, 'html.parser')
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    logger.warning(f"データ取得失敗 ({url}): {e}")
-                    return None
-                time.sleep(0.5)
-        return None
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=4)
+            resp.raise_for_status()
+            resp.encoding = 'utf-8'
+            return BeautifulSoup(resp.text, 'html.parser')
+        except Exception as e:
+            logger.debug(f"データ取得スキップ ({url}): {e}")
+            return None
 
     @staticmethod
     def parse_float(text: str) -> float:
@@ -705,7 +702,7 @@ def send_discord_notification(
     bets_formatted_table = "\n".join(table_lines)
     
     embed = {
-        "title": f"🚀 【投資GOサイン】{venue_name} {race_no}R（締切 {deadline_str} / 締切5分前）",
+        "title": f"🚀 【投資GOサイン】{venue_name} {race_no}R（締切 {deadline_str} / 発走5分前）",
         "description": (
             "**全関門突破！** 水面適格 × Gatekeeper通過 × EV残差エッジ検知\n"
             "Markowitz / SLSQP 最適化に基づく推奨ポートフォリオ資金配分です。"
@@ -799,11 +796,11 @@ def evaluate_race(
     all_odds = BoatRaceScraper.get_odds(date_str, venue_code, race_no)
     
     if df_race is None or df_race.empty:
-        logger.warning(f"⚠️ [{venue_name} {race_no}R] 出走表・展示データの取得に失敗しました（展示開始前または発売中止）。")
+        logger.warning(f"⏳ [{venue_name} {race_no}R] 展示データ・出走表が未発表または取得できませんでした（通常、締切約20分前に公開されます）。")
         return {'status': 'error_data'}
         
     if not all_odds:
-        logger.warning(f"⚠️ [{venue_name} {race_no}R] 直前3連単オッズの取得に失敗しました（オッズ未発表または発売前）。")
+        logger.warning(f"⏳ [{venue_name} {race_no}R] 直前3連単オッズが未発表または取得できませんでした。")
         return {'status': 'error_odds'}
         
     # 3. 特徴量エンジニアリング & 欠場艇動的補正
@@ -930,6 +927,170 @@ def evaluate_race(
     
     return {
         'status': 'investment_go',
+        'top_boat': top_boat,
+        'max_p1': max_p1,
+        'bets': bets,
+        'total_bet': total_bet
+    }
+
+
+def evaluate_mock_race(
+    venue_code: int = 18,
+    race_no: int = 10,
+    bankroll: float = DEFAULT_BANKROLL,
+    risk_aversion: float = DEFAULT_RISK_AVERSION,
+    max_exposure: float = DEFAULT_MAX_EXPOSURE,
+    max_concentration: float = DEFAULT_MAX_CONCENTRATION,
+    min_ev: float = DEFAULT_MIN_EV,
+    max_odds: float = DEFAULT_MAX_ODDS,
+    gatekeeper_th: float = DEFAULT_GATEKEEPER_TH,
+    webhook_url: str = DISCORD_WEBHOOK_URL,
+    dry_run: bool = False
+) -> Dict[str, Any]:
+    """
+    オフライン検証・開発用のリアルなモックデータによるフルパイプライン検証
+    """
+    v_name = VENUE_MAP.get(venue_code, f"場{venue_code:02d}")
+    date_str = datetime.date.today().strftime('%Y%m%d')
+    logger.info(f"🧪 [MOCK TEST] リアルな模擬データを用いて {v_name} {race_no}R のフルパイプライン検証を実行します...")
+    
+    # リアルな出走表 & 展示データ生成 (1号艇が圧倒的本命)
+    racers = [4320, 3960, 4444, 4012, 4500, 4210]
+    motors = [52.0, 35.0, 31.0, 28.0, 29.0, 26.0]
+    boats = [48.0, 34.0, 30.0, 27.0, 28.0, 25.0]
+    ex_times = [6.58, 6.75, 6.80, 6.85, 6.88, 6.92]
+    sts = [0.08, 0.16, 0.17, 0.19, 0.20, 0.22]
+    nat_win_rates = [8.80, 6.20, 5.50, 5.00, 4.50, 4.00]
+    local_win_rates = [9.10, 6.30, 5.60, 4.90, 4.40, 4.00]
+
+    rows = []
+    for i in range(6):
+        bn = i + 1
+        rows.append({
+            'race_id': f'{date_str}_{venue_code}_{race_no}',
+            'boat_number': bn,
+            'racer_id': racers[i],
+            'motor_rate': motors[i],
+            'boat_rate': boats[i],
+            'exhibition_time': ex_times[i],
+            'exhibition_start_timing': sts[i],
+            'pred_course': bn,
+            'wind_direction': 1,
+            'wind_speed': 2.0,
+            'wave_height': 1.0,
+            'prior_results': '1 1 1 1' if bn == 1 else '3 4 2 5',
+            'branch': '山口' if bn == 1 else '福岡',
+            'weight': 52.0,
+            'nat_win_rate': nat_win_rates[i],
+            'local_win_rate': local_win_rates[i]
+        })
+    df_race = pd.DataFrame(rows)
+    
+    # リアルな直前オッズ生成 (市場実態を反映しつつEV歪みを意図的に含む)
+    combos = [f"{c[0]}-{c[1]}-{c[2]}" for c in itertools.permutations(range(1, 7), 3)]
+    all_odds = {}
+    for c in combos:
+        if c == '1-2-3': all_odds[c] = 12.4
+        elif c == '1-2-4': all_odds[c] = 18.2
+        elif c == '1-3-2': all_odds[c] = 21.0
+        elif c == '1-3-4': all_odds[c] = 24.5
+        elif c == '1-2-5': all_odds[c] = 26.0
+        elif c.startswith('1-2'): all_odds[c] = 14.0 + int(c[-1]) * 2.0
+        elif c.startswith('1-3'): all_odds[c] = 20.0 + int(c[-1]) * 2.5
+        elif c.startswith('1-'): all_odds[c] = 30.0 + int(c[-1]) * 3.0
+        else: all_odds[c] = 80.0 + int(c[0]) * 20.0
+
+    # 特徴量生成
+    df_feat = FeatureEngineer.process(df_race, v_name)
+    active_boats = df_feat['boat_number'].tolist()
+    
+    syn_dict = {b: 0.0 for b in active_boats}
+    for combo, o_val in all_odds.items():
+        try:
+            b1 = int(combo.split('-')[0])
+            if o_val > 0 and b1 in syn_dict:
+                syn_dict[b1] += (1.0 / o_val)
+        except Exception: pass
+        
+    total_syn = sum(syn_dict.values())
+    p_norm_syn_dict = {b: syn_dict[b] / total_syn for b in active_boats}
+    df_feat['syn_win_rate'] = df_feat['boat_number'].map(p_norm_syn_dict).fillna(1.0 / 6.0)
+    df_feat['init_score'] = probs_to_init_scores(df_feat['syn_win_rate'].to_numpy())
+    
+    # Gatekeeper 推論
+    model_h = lgb.Booster(model_file=MODEL_HONMEI_PATH)
+    df_h = prepare_features_for_model(df_feat, model_h)
+    df_feat['score_honmei'] = model_h.predict(df_h)
+    calibrator = get_default_calibrator('platt')
+    scores_h_dict = dict(zip(df_feat['boat_number'], df_feat['score_honmei']))
+    p1_dict_honmei = calibrator.calibrate_scores(scores_h_dict)
+    
+    sorted_p1 = sorted(p1_dict_honmei.items(), key=lambda x: x[1], reverse=True)
+    top_boat, max_p1 = sorted_p1[0]
+    prob_gap = (max_p1 - sorted_p1[1][1]) if len(sorted_p1) > 1 else 0.0
+    
+    logger.info(f"🛡️ [MOCK] Gatekeeper P1 = {max_p1:.2%} ({top_boat}号艇本命 / 閾値: {gatekeeper_th:.2%})")
+    
+    # Extractor 推論
+    model_r = lgb.Booster(model_file=MODEL_RESIDUAL_PATH)
+    df_r = prepare_features_for_model(df_feat, model_r)
+    raw_res = model_r.predict(df_r, raw_score=True)
+    total_logits = raw_res + df_feat['init_score'].to_numpy()
+    p_raw_res = 1.0 / (1.0 + np.exp(-np.clip(total_logits, -30, 30)))
+    p_norm_res = p_raw_res / np.sum(p_raw_res)
+    p1_dict_residual = dict(zip(df_feat['boat_number'], p_norm_res))
+    
+    # Benter 展開
+    cluster_d2, cluster_d3, cluster_id, cluster_name = get_cluster_benter_params(venue_code)
+    benter_probs, _, _ = calculate_benter_probs(
+        p1_dict_residual,
+        d2=cluster_d2,
+        d3=cluster_d3,
+        calibration_method='direct'
+    )
+    benter_probs_dict = {p['combo']: p['prob'] for p in benter_probs}
+    
+    # 最適化
+    optimizer = PortfolioOptimizer()
+    bets = optimizer.optimize_funds(
+        probabilities=benter_probs_dict,
+        odds=all_odds,
+        bankroll=float(bankroll),
+        risk_aversion=float(risk_aversion),
+        max_exposure=max_exposure,
+        max_concentration=max_concentration,
+        min_ev=float(min_ev),
+        max_odds=float(max_odds),
+        kelly_fraction=None
+    )
+    
+    total_bet = sum(bets.values()) if bets else 0
+    logger.info(f"🚀 [MOCK] 最適化選出買い目数: {len(bets)}点 / 投資総額: {total_bet:,}円")
+    
+    if bets:
+        send_discord_notification(
+            webhook_url=webhook_url,
+            date_str=date_str,
+            venue_code=venue_code,
+            venue_name=v_name,
+            race_no=race_no,
+            deadline_str="15:25 (MOCK)",
+            top_boat=top_boat,
+            max_p1=max_p1,
+            prob_gap=prob_gap,
+            cluster_id=cluster_id,
+            cluster_name=cluster_name,
+            bets=bets,
+            benter_probs=benter_probs_dict,
+            all_odds=all_odds,
+            bankroll=bankroll,
+            dry_run=dry_run
+        )
+    else:
+        logger.info("[MOCK] 最適化条件を満たす買い目が選出されなかったため、Discord送信は見送られました。")
+        
+    return {
+        'status': 'mock_success',
         'top_boat': top_boat,
         'max_p1': max_p1,
         'bets': bets,
@@ -1064,14 +1225,15 @@ def run_worker_loop(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="BOATRACE AI Auto Trader Worker")
     parser.add_argument('--test', action='store_true', help="Run single race test evaluation immediately")
+    parser.add_argument('--mock', action='store_true', help="Run mock evaluation without web requests (ideal for midnight/offline tests)")
     parser.add_argument('--date', type=str, default='', help="Date for test in YYYYMMDD (default: today)")
-    parser.add_argument('--venue', type=int, default=1, help="Venue code for test (1-24, default: 1)")
-    parser.add_argument('--race', type=int, default=1, help="Race number for test (1-12, default: 1)")
+    parser.add_argument('--venue', type=int, default=18, help="Venue code for test (1-24, default: 18/Tokuyama)")
+    parser.add_argument('--race', type=int, default=10, help="Race number for test (1-12, default: 10)")
     parser.add_argument('--bankroll', type=float, default=DEFAULT_BANKROLL, help="Simulated bankroll (default: 100,000)")
     parser.add_argument('--min_ev', type=float, default=DEFAULT_MIN_EV, help="Minimum EV threshold (default: 1.25)")
     parser.add_argument('--max_odds', type=float, default=DEFAULT_MAX_ODDS, help="Maximum Odds threshold (default: 30.0)")
     parser.add_argument('--p1_th', type=float, default=DEFAULT_GATEKEEPER_TH, help="Gatekeeper P1 threshold (default: 0.7438)")
-    parser.add_argument('--dry-run', action='store_true', help="Run without sending Discord webhook")
+    parser.add_argument('--dry-run', action='store_true', help="Run without sending Discord webhook (console output only)")
     
     args = parser.parse_args()
     
@@ -1079,16 +1241,11 @@ if __name__ == "__main__":
     if args.dry_run:
         webhook = ''
         
-    if args.test:
-        test_date = args.date if args.date else datetime.date.today().strftime('%Y%m%d')
-        v_name = VENUE_MAP.get(args.venue, f"場{args.venue:02d}")
-        logger.info(f"🧪 [TEST MODE] 即時単体テスト実行: {test_date} {v_name} {args.race}R")
-        res = evaluate_race(
-            date_str=test_date,
+    if args.mock:
+        # モック検証モード
+        evaluate_mock_race(
             venue_code=args.venue,
-            venue_name=v_name,
             race_no=args.race,
-            deadline_str="テスト時刻",
             bankroll=args.bankroll,
             min_ev=args.min_ev,
             max_odds=args.max_odds,
@@ -1096,7 +1253,43 @@ if __name__ == "__main__":
             webhook_url=webhook,
             dry_run=args.dry_run
         )
-        logger.info(f"🧪 テスト結果: {res}")
+    elif args.test:
+        test_date = args.date if args.date else datetime.date.today().strftime('%Y%m%d')
+        v_name = VENUE_MAP.get(args.venue, f"場{args.venue:02d}")
+        
+        # 開催場チェック
+        today_venues = fetch_today_venues(test_date)
+        holding_codes = [v[0] for v in today_venues]
+        
+        if holding_codes and args.venue not in holding_codes:
+            holding_names = ", ".join([f"{v[1]}({v[0]:02d})" for v in today_venues])
+            logger.warning(
+                f"⚠️ 指定された日付 ({test_date}) は 【{v_name}】 ではレースが開催されていません。\n"
+                f"🏟️ 本日の開催場: {holding_names}\n"
+                f"💡 パイプライン全体の動作確認を行いたい場合は '--mock' オプションを付与してください。\n"
+                f"   例: python auto_trader.py --mock --dry-run"
+            )
+        else:
+            logger.info(f"🧪 [TEST MODE] 実レースデータ取得テスト: {test_date} {v_name} {args.race}R")
+            res = evaluate_race(
+                date_str=test_date,
+                venue_code=args.venue,
+                venue_name=v_name,
+                race_no=args.race,
+                deadline_str="テスト時刻",
+                bankroll=args.bankroll,
+                min_ev=args.min_ev,
+                max_odds=args.max_odds,
+                gatekeeper_th=args.p1_th,
+                webhook_url=webhook,
+                dry_run=args.dry_run
+            )
+            if res.get('status') in ('error_data', 'error_odds'):
+                logger.info(
+                    f"💡 レース未開催または展示開始前の時間帯です。\n"
+                    f"   今すぐ推論・最適化・通知レイアウトの動作確認を行いたい場合は '--mock' を付与してください。\n"
+                    f"   例: python auto_trader.py --mock --dry-run"
+                )
     else:
         run_worker_loop(
             bankroll=args.bankroll,
