@@ -1,0 +1,10 @@
+# Auto detect text files and perform LF normalization
+* text=auto eol=lf
+
+# Force binary treatment for models and data files to prevent line-ending corruption
+model_*.txt -text
+*.npy -text
+*.joblib -text
+*.png -text
+*.db -text
+*.sqlite -text

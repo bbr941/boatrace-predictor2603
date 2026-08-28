@@ -481,6 +481,7 @@ class FeatureEngineer:
                 '芦屋': 21, '福岡': 22, '唐津': 23, '大村': 24
             }
             df['venue_code_int'] = df['venue_name'].map(venue_map_rev).fillna(0).astype(int)
+            df['venue_code_y'] = df['venue_code_int'].astype(str).str.zfill(2)
             r_venue['Venue'] = pd.to_numeric(r_venue['Venue'], errors='coerce').fillna(0).astype(int)
             
             df = df.merge(r_venue, left_on=['racer_id', 'venue_code_int'], right_on=['RacerID', 'Venue'], how='left')
@@ -574,16 +575,50 @@ class FeatureEngineer:
             df['wind_direction'] = df['wind_direction'].map(wind_map).fillna(df['wind_direction']).astype(str).replace('nan', '')
 
         for col in df.columns:
-            if col not in ['race_id', 'race_date', 'venue_name', 'prior_results', 'wind_direction', 'branch', 'class', 'racer_class']:
+            if col not in ['race_id', 'race_date', 'venue_name', 'prior_results', 'wind_direction', 'branch', 'class', 'racer_class', 'venue_code_y']:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
-        
-        ignore_cols = ['race_id', 'race_date', 'prior_results', 'pred_score', 'weight_for_loss', 'relevance', 'rank']
-        for col in df.columns:
-            if col in ignore_cols: continue
-            if df[col].dtype == 'object':
-                df[col] = df[col].astype('category')
 
         return df
+
+
+def prepare_features_for_model(df_feat: pd.DataFrame, model: lgb.Booster) -> pd.DataFrame:
+    """
+    LightGBM Booster の学習時 categorical_feature 仕様（pandas_categorical）に
+    完全に適合した特徴量 DataFrame を構築する。
+    """
+    feats = model.feature_name()
+    pandas_cats = model.pandas_categorical
+    df_out = pd.DataFrame(index=df_feat.index)
+    
+    cat_cols_map = {}
+    if pandas_cats:
+        cat_candidates = ['branch', 'venue_code_y', 'wind_direction', 'class', 'racer_class']
+        actual_cat_cols = [f for f in feats if f in cat_candidates]
+        for i, col_name in enumerate(actual_cat_cols):
+            if i < len(pandas_cats):
+                cat_cols_map[col_name] = pandas_cats[i]
+                
+    for f in feats:
+        if f in cat_cols_map:
+            cat_list = cat_cols_map[f]
+            if f in df_feat.columns:
+                val_series = df_feat[f].astype(str)
+            elif f == 'venue_code_y' and 'venue_code_int' in df_feat.columns:
+                val_series = df_feat['venue_code_int'].astype(str).str.zfill(2)
+            elif f == 'venue_code_y' and 'temp_venue_code' in df_feat.columns:
+                val_series = df_feat['temp_venue_code'].astype(str).str.zfill(2)
+            else:
+                val_series = pd.Series([cat_list[0]] * len(df_feat), index=df_feat.index)
+            df_out[f] = pd.Categorical(val_series, categories=cat_list)
+        else:
+            if f in df_feat.columns:
+                df_out[f] = pd.to_numeric(df_feat[f], errors='coerce').fillna(0.0).astype(float)
+            elif f == 'syn_win_rate':
+                df_out[f] = 0.0
+            else:
+                df_out[f] = 0.0
+                
+    return df_out
 
 
 # ==========================================
@@ -709,11 +744,8 @@ if st.session_state.get('run_analysis'):
             try:
                 # 1. Gatekeeper 推論 (Honmei)
                 model_h = lgb.Booster(model_file=MODEL_HONMEI_PATH)
-                feats_h = model_h.feature_name()
-                for f in feats_h:
-                    if f not in df_feat.columns: df_feat[f] = 0
-                
-                score_h = model_h.predict(df_feat[feats_h])
+                df_h = prepare_features_for_model(df_feat, model_h)
+                score_h = model_h.predict(df_h)
                 df_feat['score_honmei'] = score_h
                 
                 calibrator = get_default_calibrator('platt')
@@ -726,11 +758,8 @@ if st.session_state.get('run_analysis'):
 
                 # 2. Extractor 推論 (Residual)
                 model_r = lgb.Booster(model_file=MODEL_RESIDUAL_PATH)
-                feats_r = model_r.feature_name()
-                for f in feats_r:
-                    if f not in df_feat.columns: df_feat[f] = 0
-                
-                raw_res = model_r.predict(df_feat[feats_r], raw_score=True)
+                df_r = prepare_features_for_model(df_feat, model_r)
+                raw_res = model_r.predict(df_r, raw_score=True)
                 total_logits = raw_res + df_feat['init_score'].to_numpy()
                 p_raw_res = 1.0 / (1.0 + np.exp(-np.clip(total_logits, -30, 30)))
                 p_norm_res = p_raw_res / np.sum(p_raw_res)
