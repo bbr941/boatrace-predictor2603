@@ -85,16 +85,19 @@ def run_simulation(
     percentile_th: float = PERCENTILE_DEFAULT,
     kelly_fraction: float = KELLY_FRACTION_DEFAULT,
     use_cluster_benter: bool = True,
+    exclude_cluster1: bool = False,
     model_honmei_path: str = MODEL_HONMEI_PATH,
     model_residual_path: str = MODEL_RESIDUAL_PATH
 ):
     """
-    Gatekeeper (85th percentile) & Extractor (クラスタ別Benter) & Fractional Kelly 最適化バックテスト
+    Gatekeeper (85th percentile) & Extractor (クラスタ別Benter) & 最適化バックテスト
+    exclude_cluster1=True の場合、難水面 (戸田02, 江戸川03, 平和島04, 鳴門14, 福岡22) を Gatekeeper 前に即時除外
     """
     t_start_total = time.time()
     
     # クラスタ別Benter設定ロード
     cluster_cfg = load_benter_cluster_config()
+    cluster1_venues = set(cluster_cfg.get('clusters', {}).get('cluster_1', {}).get('venues', [2, 3, 4, 14, 22]))
 
     print("\n" + "=" * 75, flush=True)
     print("  🚀 BOATRACE 最終バックテスト: Gatekeeper (相対評価85th%) & Extractor", flush=True)
@@ -102,10 +105,14 @@ def run_simulation(
     print(f"  Gatekeeper モデル (Honmei) : {model_honmei_path} (Platt Scaling 相対評価)", flush=True)
     print(f"  Extractor モデル (Residual): {model_residual_path} (OddsResidual + 会場クラスタ別Benter)", flush=True)
     print(f"  対象レース数上限           : {max_races:,} レース", flush=True)
-    print(f"  Gatekeeper スクリーニング  : 上位 {100.0 - percentile_th:.1f}% 分位点 (85th percentile 動的閾値)", flush=True)
+    print(f"  Gatekeeper スクリーニング  : 上位 {100.0 - percentile_th:.1f}% 分位点 ({percentile_th:.1f}th percentile 動的閾値)", flush=True)
+    print(f"  難水面 (Cluster 1) 除外    : {'有効 (戸田02, 江戸川03, 平和島04, 鳴門14, 福岡22 を完全除外)' if exclude_cluster1 else '無効 (全水面対象)'}", flush=True)
     print(f"  Benter 展開モード          : {'会場クラスタ別動的最適化 (Cluster 0, 1, 2)' if use_cluster_benter else '固定値 (d2=0.40, d3=0.60)'}", flush=True)
     print(f"  Optimizer 厳格化制約       : EV >= {min_ev:.2f}, Odds <= {max_odds:.1f}, λ = {risk_aversion:.1f}", flush=True)
-    print(f"  資金配分モデル             : Fractional Kelly (f = {kelly_fraction:.2f}, 動的上限 <= 10.0%)", flush=True)
+    if kelly_fraction is not None and kelly_fraction > 0:
+        print(f"  資金配分モデル             : Fractional Kelly (f = {kelly_fraction:.2f}, レース動的上限 <= 10.0%, 買い目上限 {max_concentration:.1%})", flush=True)
+    else:
+        print(f"  資金配分モデル             : 固定ウェイト (レース上限 {max_exposure:.1%}, 買い目上限 {max_concentration:.1%})", flush=True)
     print("-" * 75, flush=True)
 
 
@@ -181,22 +188,32 @@ def run_simulation(
     test_df['score_honmei'] = model_honmei.predict(test_df[feats_honmei])
     calibrator = get_default_calibrator('platt')
 
-    # 全対象レースの Gatekeeper 1着確率 P1 (Top-1) を事前集計
+    # 対象レースの Gatekeeper 1着確率 P1 (Top-1) を事前集計 (Cluster 1除外時は対象外として集計)
     all_races_p1_top = []
     race_top_p1_map = {}
+    c1_excluded_pre_count = 0
     
     for rid, group in test_df.groupby('race_id', sort=False):
+        vcode = race_venue_map.get(rid, int(str(rid).split('_')[0]) if '_' in str(rid) else 1)
         s_dict = dict(zip(group['boat_number'], group['score_honmei']))
         p_dict_h = calibrator.calibrate_scores(s_dict)
         top_p1 = max(p_dict_h.values())
-        all_races_p1_top.append(top_p1)
         race_top_p1_map[rid] = top_p1
+        if exclude_cluster1 and vcode in cluster1_venues:
+            c1_excluded_pre_count += 1
+            continue
+        all_races_p1_top.append(top_p1)
 
     all_races_p1_top = np.array(all_races_p1_top)
     dynamic_p1_threshold = float(np.percentile(all_races_p1_top, percentile_th))
     
-    print(f"\n  🎯 Gatekeeper 相対評価 分位点 (85th percentile) 算出完了:")
-    print(f"     ・母集団レース数       : {len(all_races_p1_top):,} レース")
+    print(f"\n  🎯 Gatekeeper 相対評価 分位点 ({percentile_th:.1f}th percentile) 算出完了:")
+    if exclude_cluster1:
+        print(f"     ・総抽出レース数       : {len(test_df.groupby('race_id', sort=False)):,} レース")
+        print(f"     ・Cluster 1 事前除外   : {c1_excluded_pre_count:,} レース")
+        print(f"     ・評価母集団レース数   : {len(all_races_p1_top):,} レース (Cluster 0 & Cluster 2)")
+    else:
+        print(f"     ・母集団レース数       : {len(all_races_p1_top):,} レース")
     print(f"     ・P1 最小値 / 平均 / 最大: {all_races_p1_top.min():.2%} / {all_races_p1_top.mean():.2%} / {all_races_p1_top.max():.2%}")
     print(f"     ・動的カットオフ閾値   : P1 >= {dynamic_p1_threshold:.4f} ({dynamic_p1_threshold:.2%})")
     print(f"     ・上位通過予定レース数 : {np.sum(all_races_p1_top >= dynamic_p1_threshold):,} レース ({np.mean(all_races_p1_top >= dynamic_p1_threshold):.2%})")
@@ -211,6 +228,7 @@ def run_simulation(
     t_sim_start = time.time()
     t_extractor_opt = 0.0
     gatekeeper_passed = 0
+    c1_skipped_count = 0
     count = 0
     total_target_races = len(groups)
     
@@ -220,15 +238,34 @@ def run_simulation(
         venue_code = race_venue_map.get(rid, int(str(rid).split('_')[0]) if '_' in str(rid) else 1)
         
         # ----------------------------------------------------
+        # 難水面 (Cluster 1) 即時除外 (Gatekeeper判定前にスキップ)
+        # ----------------------------------------------------
+        if exclude_cluster1 and venue_code in cluster1_venues:
+            c1_skipped_count += 1
+            race_results_cache.append({
+                'race_id': rid,
+                'venue_code': venue_code,
+                'cluster_id': 1,
+                'cluster_name': 'Cluster 1 (難水面・除外)',
+                'gatekeeper_passed': False,
+                'cluster1_skipped': True,
+                'bets': {},
+                'actual_combo': None,
+                'all_odds': {}
+            })
+            continue
+
+        # ----------------------------------------------------
         # プロセス1: Gatekeeper (相対評価 85th percentile 閾値判定)
         # ----------------------------------------------------
         if top_p1 < dynamic_p1_threshold:
             race_results_cache.append({
                 'race_id': rid,
                 'venue_code': venue_code,
-                'cluster_id': 2,
-                'cluster_name': 'スキップ',
+                'cluster_id': 2 if venue_code not in [18, 21, 23, 24] else 0,
+                'cluster_name': 'Gatekeeper除外',
                 'gatekeeper_passed': False,
+                'cluster1_skipped': False,
                 'bets': {},
                 'actual_combo': None,
                 'all_odds': {}
@@ -299,6 +336,7 @@ def run_simulation(
             'cluster_id': c_id,
             'cluster_name': c_name,
             'gatekeeper_passed': True,
+            'cluster1_skipped': False,
             'bets': bets,
             'all_odds': all_odds,
             'actual_combo': actual_combo
@@ -382,7 +420,13 @@ def run_simulation(
     print("  🏆 バックテスト最終結果サマリー (Gatekeeper 85th% & クラスタ別Benter & 厳格化Optimizer)", flush=True)
     print("=" * 75, flush=True)
     print(f"  総処理レース数          : {total_target_races:,} レース")
-    print(f"  Gatekeeper 通過レース   : {gatekeeper_passed:,} レース ({gatekeeper_passed/total_target_races:.2%}) (閾値: P1 >= {dynamic_p1_threshold:.2%})")
+    if exclude_cluster1:
+        print(f"  Cluster 1 除外レース数  : {c1_skipped_count:,} レース ({c1_skipped_count/total_target_races:.2%})")
+        valid_pop = total_target_races - c1_skipped_count
+        print(f"  有効評価母集団レース数  : {valid_pop:,} レース")
+        print(f"  Gatekeeper 通過レース   : {gatekeeper_passed:,} レース ({gatekeeper_passed/valid_pop:.2%} / 有効母集団比) (閾値: P1 >= {dynamic_p1_threshold:.2%})")
+    else:
+        print(f"  Gatekeeper 通過レース   : {gatekeeper_passed:,} レース ({gatekeeper_passed/total_target_races:.2%}) (閾値: P1 >= {dynamic_p1_threshold:.2%})")
     print(f"  参戦レース数 (Betted)   : {stats['betted']:,} レース ({betted_rate:.2%})")
     print(f"  的中レース数 (Hits)     : {stats['hits']:,} レース")
     print(f"  的中率 (Hit Rate)       : {hit_rate:.2%} (全レース基準: {stats['hits']/total_target_races:.2%})")
@@ -402,6 +446,9 @@ def run_simulation(
     print("-" * 75, flush=True)
     print(f"  🎯 会場クラスタ別内訳:")
     for c_id, c_data in cluster_stats.items():
+        if exclude_cluster1 and c_id == 1:
+            print(f"    ・{c_data['name']:<22}: 【完全除外】 (0R 参戦 / {c1_skipped_count}R スキップ)")
+            continue
         c_roi = (c_data['return_amt'] / c_data['bet_amt']) if c_data['bet_amt'] > 0 else 0.0
         c_hit_rate = (c_data['hits'] / c_data['betted']) if c_data['betted'] > 0 else 0.0
         print(f"    ・{c_data['name']:<22}: 参戦 {c_data['betted']:>3d}R | 的中 {c_data['hits']:>2d}R ({c_hit_rate:.1%}) | 投資 {int(c_data['bet_amt']):>7,d}円 | 払戻 {int(c_data['return_amt']):>7,d}円 | ROI: {c_roi:>6.2%}")
@@ -414,6 +461,7 @@ def run_simulation(
 
     return {
         'total_races': total_target_races,
+        'c1_skipped_count': c1_skipped_count if exclude_cluster1 else 0,
         'gatekeeper_passed': gatekeeper_passed,
         'dynamic_threshold': dynamic_p1_threshold,
         'betted_races': stats['betted'],
@@ -441,8 +489,9 @@ if __name__ == "__main__":
     parser.add_argument('--min_ev', type=float, default=MIN_EV_DEFAULT, help="Minimum EV threshold (default: 1.25)")
     parser.add_argument('--max_odds', type=float, default=MAX_ODDS_DEFAULT, help="Maximum Odds upper bound (default: 30.0)")
     parser.add_argument('--percentile', type=float, default=PERCENTILE_DEFAULT, help="Gatekeeper percentile cutoff (default: 85.0)")
-    parser.add_argument('--kelly_fraction', type=float, default=KELLY_FRACTION_DEFAULT, help="Fractional Kelly fraction (default: 0.25)")
+    parser.add_argument('--kelly_fraction', type=float, default=0.0, help="Fractional Kelly fraction (0.0 for fixed weight, default: 0.0)")
     parser.add_argument('--use_cluster_benter', action='store_true', default=True, help="Use cluster-specific Benter parameters")
+    parser.add_argument('--exclude_cluster1', action='store_true', default=False, help="Exclude Cluster 1 (difficult water) races before Gatekeeper")
     parser.add_argument('--model_honmei', type=str, default=MODEL_HONMEI_PATH, help="Path to Gatekeeper honmei model")
     parser.add_argument('--model_residual', type=str, default=MODEL_RESIDUAL_PATH, help="Path to Extractor residual model")
     
@@ -458,6 +507,7 @@ if __name__ == "__main__":
         percentile_th=args.percentile,
         kelly_fraction=args.kelly_fraction,
         use_cluster_benter=args.use_cluster_benter,
+        exclude_cluster1=args.exclude_cluster1,
         model_honmei_path=args.model_honmei,
         model_residual_path=args.model_residual
     )
