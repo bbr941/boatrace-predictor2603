@@ -45,22 +45,23 @@ PERCENTILE_DEFAULT = 85.0       # Gatekeeper 上位15% (85th percentile)
 KELLY_FRACTION_DEFAULT = 0.25   # Fractional Kelly 係数 (クォーター・ケリー, 最大10%クリップ)
 
 
+import db_manager
+
 def get_db_connection():
-    if os.path.exists('boatrace.db'):
-        return sqlite3.connect('boatrace.db')
-    return sqlite3.connect(DB_PATH)
+    return db_manager.get_db_connection()
 
 
-def load_all_odds_batch(conn, race_ids):
+def load_all_odds_batch(db, race_ids):
     """対象レースの3連単オッズデータを一括でメモリキャッシュ"""
     print("  [Pre-caching] オッズデータを一括ロード中...", flush=True)
     t0 = time.time()
     odds_cache = {}
-    cursor = conn.cursor()
+    cursor = db.cursor()
     chunk_size = 500
+    ph = "%s" if getattr(db, 'is_postgres', False) else "?"
     for i in range(0, len(race_ids), chunk_size):
         chunk_rids = race_ids[i:i + chunk_size]
-        placeholders = ','.join(['?'] * len(chunk_rids))
+        placeholders = ','.join([ph] * len(chunk_rids))
         query = f"SELECT race_id, combination, odds_1min FROM odds_data WHERE race_id IN ({placeholders}) AND length(combination) = 3"
         cursor.execute(query, chunk_rids)
         for rid, comb_db, val in cursor.fetchall():
@@ -120,7 +121,9 @@ def run_simulation(
     print("  [1/4] DBから対象レース & 最新オッズデータを一括キャッシュ中...", flush=True)
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT DISTINCT race_id FROM odds_data ORDER BY rowid DESC LIMIT ?", [max_races])
+    ph = "%s" if getattr(conn, 'is_postgres', False) else "?"
+    order_clause = "id DESC" if getattr(conn, 'is_postgres', False) else "rowid DESC"
+    cursor.execute(f"SELECT DISTINCT race_id FROM odds_data ORDER BY {order_clause} LIMIT {ph}", [max_races])
     valid_races = [row[0] for row in cursor.fetchall()]
     valid_races_set = set(valid_races)
     print(f"        -> 抽出レース数: {len(valid_races):,} レース", flush=True)

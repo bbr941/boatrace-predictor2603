@@ -5,6 +5,7 @@ auto_trader.py
 - 各レースの「締切5分前」に自動トリガー実行
 - 黄金ベースライン（Cluster 1除外 + Gatekeeper P1 >= 0.7438 + Extractor/Benter + Strict Optimizer）
 - 投資GOサイン検知時のみ Discord Webhook へリッチ Embed 通知送信
+- Supabase (PostgreSQL) への推論結果・オッズ・買い目・通知ログの自動永続化
 - 開発・検証用 モックテストモード (--mock) 完備
 """
 
@@ -39,6 +40,7 @@ from probability_calibration import (
     load_benter_cluster_config
 )
 from portfolio_optimizer import PortfolioOptimizer
+import db_manager
 
 # ロギング設定
 logging.basicConfig(
@@ -685,6 +687,7 @@ def send_discord_notification(
     """投資GOサインが点灯したレースを Discord Webhook へ Embed 送信"""
     total_bet = sum(bets.values())
     max_return = max([amt * all_odds.get(c, 0.0) for c, amt in bets.items()]) if bets else 0
+    race_id = f"{date_str}_{venue_code}_{race_no}"
     
     # 買い目テーブル整形
     table_lines = [
@@ -701,8 +704,10 @@ def send_discord_notification(
     table_lines.append("```")
     bets_formatted_table = "\n".join(table_lines)
     
+    title_text = f"🚀 【投資GOサイン】{venue_name} {race_no}R（締切 {deadline_str} / 発走5分前）"
+    
     embed = {
-        "title": f"🚀 【投資GOサイン】{venue_name} {race_no}R（締切 {deadline_str} / 発走5分前）",
+        "title": title_text,
         "description": (
             "**全関門突破！** 水面適格 × Gatekeeper通過 × EV残差エッジ検知\n"
             "Markowitz / SLSQP 最適化に基づく推奨ポートフォリオ資金配分です。"
@@ -737,6 +742,18 @@ def send_discord_notification(
     }
     
     logger.info(f"✨ [DISCORD NOTIFICATION TRIGGERED] {venue_name} {race_no}R | 投資総額: {total_bet:,}円 | 買い目: {len(bets)}点")
+    
+    # Supabase へ通知ログを保存
+    try:
+        db_manager.save_notification_log(
+            race_id=race_id,
+            channel='discord',
+            title=title_text,
+            payload=embed,
+            status='dry_run' if (dry_run or not webhook_url) else 'sent'
+        )
+    except Exception as e:
+        logger.warning(f"通知ログ保存エラー: {e}")
     
     if dry_run or not webhook_url:
         logger.info("[DRY-RUN / NO WEBHOOK] Discord送信をスキップしました (Payloadはコンソールに出力):")
@@ -784,11 +801,20 @@ def evaluate_race(
     """
     指定レースの直前オッズ・出走データを取得し、黄金ベースライン推論を実行
     """
+    race_id = f"{date_str}_{venue_code}_{race_no}"
     logger.info(f"🔍 [EVALUATING] {venue_name} {race_no}R (締切: {deadline_str}) の分析を開始...")
     
     # 1. 難水面（Cluster 1）即時除外ガード
     if venue_code in CLUSTER_1_VENUES:
         logger.info(f"🛑 [SKIP] {venue_name} (会場コード: {venue_code:02d}) は難水面 (Cluster 1) のためシステム保護によりスキップします。")
+        try:
+            db_manager.save_race_prediction(
+                race_id=race_id, race_date=date_str, venue_code=venue_code,
+                venue_name=venue_name, race_no=race_no, deadline_time=deadline_str,
+                top_boat=None, max_p1=None, prob_gap=None, gatekeeper_passed=False,
+                cluster_id=1, cluster_name="難水面・波乱場", status="skipped_cluster1"
+            )
+        except Exception: pass
         return {'status': 'skipped_cluster1'}
         
     # 2. 出走データ & 直前オッズスクレイピング
@@ -802,6 +828,12 @@ def evaluate_race(
     if not all_odds:
         logger.warning(f"⏳ [{venue_name} {race_no}R] 直前3連単オッズが未発表または取得できませんでした。")
         return {'status': 'error_odds'}
+        
+    # オッズデータを Supabase に非同期/即時保存
+    try:
+        db_manager.save_odds_batch(race_id, all_odds)
+    except Exception as e:
+        logger.debug(f"オッズ保存エラー: {e}")
         
     # 3. 特徴量エンジニアリング & 欠場艇動的補正
     df_feat = FeatureEngineer.process(df_race, venue_name)
@@ -848,11 +880,21 @@ def evaluate_race(
     top_boat, max_p1 = sorted_p1[0]
     prob_gap = (max_p1 - sorted_p1[1][1]) if len(sorted_p1) > 1 else 0.0
     
+    cluster_d2, cluster_d3, cluster_id, cluster_name = get_cluster_benter_params(venue_code)
+    
     logger.info(f"🛡️ [{venue_name} {race_no}R] Gatekeeper P1 = {max_p1:.2%} ({top_boat}号艇本命 / 閾値: {gatekeeper_th:.2%})")
     
     # Gatekeeper 閾値判定 ($P_1 \ge 0.7438$)
     if max_p1 < gatekeeper_th:
         logger.info(f"☕ [{venue_name} {race_no}R] Gatekeeper 未達 (P1 = {max_p1:.2%} < {gatekeeper_th:.2%}) -> 見送り (No Bet)")
+        try:
+            db_manager.save_race_prediction(
+                race_id=race_id, race_date=date_str, venue_code=venue_code,
+                venue_name=venue_name, race_no=race_no, deadline_time=deadline_str,
+                top_boat=top_boat, max_p1=max_p1, prob_gap=prob_gap, gatekeeper_passed=False,
+                cluster_id=cluster_id, cluster_name=cluster_name, status="gatekeeper_skipped"
+            )
+        except Exception: pass
         return {
             'status': 'gatekeeper_skipped',
             'top_boat': top_boat,
@@ -871,7 +913,6 @@ def evaluate_race(
     p1_dict_residual = dict(zip(df_feat['boat_number'], p_norm_res))
     
     # 7. 会場クラスタ別 Benter 確率展開
-    cluster_d2, cluster_d3, cluster_id, cluster_name = get_cluster_benter_params(venue_code)
     benter_probs, _, _ = calculate_benter_probs(
         p1_dict_residual,
         d2=cluster_d2,
@@ -894,9 +935,17 @@ def evaluate_race(
         kelly_fraction=None  # 固定ウェイト (レース上限5%, 買い目上限2%)
     )
     
-    # 9. 結果判定 & Discord通知
+    # 9. 結果判定 & Supabase永続化 & Discord通知
     if not bets:
         logger.info(f"🔍 [{venue_name} {race_no}R] Gatekeeper通過も、条件を満たすEV買い目なし (EV >= {min_ev:.2f}, Odds <= {max_odds:.1f}) -> 見送り")
+        try:
+            db_manager.save_race_prediction(
+                race_id=race_id, race_date=date_str, venue_code=venue_code,
+                venue_name=venue_name, race_no=race_no, deadline_time=deadline_str,
+                top_boat=top_boat, max_p1=max_p1, prob_gap=prob_gap, gatekeeper_passed=True,
+                cluster_id=cluster_id, cluster_name=cluster_name, status="no_value_bets"
+            )
+        except Exception: pass
         return {
             'status': 'no_value_bets',
             'top_boat': top_boat,
@@ -905,6 +954,18 @@ def evaluate_race(
         
     total_bet = sum(bets.values())
     logger.info(f"🚀🚀🚀 [{venue_name} {race_no}R] 投資GOサイン点灯！ 推奨買い目: {len(bets)}点 / 総投資額: {total_bet:,}円")
+    
+    # Supabase へ推論結果および買い目を永続化
+    try:
+        db_manager.save_race_prediction(
+            race_id=race_id, race_date=date_str, venue_code=venue_code,
+            venue_name=venue_name, race_no=race_no, deadline_time=deadline_str,
+            top_boat=top_boat, max_p1=max_p1, prob_gap=prob_gap, gatekeeper_passed=True,
+            cluster_id=cluster_id, cluster_name=cluster_name, status="investment_go"
+        )
+        db_manager.save_recommended_bets(race_id, bets, benter_probs_dict, all_odds)
+    except Exception as e:
+        logger.error(f"Supabaseへの推論結果保存エラー: {e}")
     
     send_discord_notification(
         webhook_url=webhook_url,
@@ -948,10 +1009,11 @@ def evaluate_mock_race(
     dry_run: bool = False
 ) -> Dict[str, Any]:
     """
-    オフライン検証・開発用のリアルなモックデータによるフルパイプライン検証
+    オフライン検証・開発用のリアルなモックデータによるフルパイプライン検証（DB永続化含む）
     """
     v_name = VENUE_MAP.get(venue_code, f"場{venue_code:02d}")
     date_str = datetime.date.today().strftime('%Y%m%d')
+    race_id = f"{date_str}_{venue_code}_{race_no}_MOCK"
     logger.info(f"🧪 [MOCK TEST] リアルな模擬データを用いて {v_name} {race_no}R のフルパイプライン検証を実行します...")
     
     # リアルな出走表 & 展示データ生成 (1号艇が圧倒的本命)
@@ -967,7 +1029,7 @@ def evaluate_mock_race(
     for i in range(6):
         bn = i + 1
         rows.append({
-            'race_id': f'{date_str}_{venue_code}_{race_no}',
+            'race_id': race_id,
             'boat_number': bn,
             'racer_id': racers[i],
             'motor_rate': motors[i],
@@ -999,6 +1061,11 @@ def evaluate_mock_race(
         elif c.startswith('1-3'): all_odds[c] = 20.0 + int(c[-1]) * 2.5
         elif c.startswith('1-'): all_odds[c] = 30.0 + int(c[-1]) * 3.0
         else: all_odds[c] = 80.0 + int(c[0]) * 20.0
+
+    # オッズ保存
+    try:
+        db_manager.save_odds_batch(race_id, all_odds)
+    except Exception: pass
 
     # 特徴量生成
     df_feat = FeatureEngineer.process(df_race, v_name)
@@ -1066,6 +1133,19 @@ def evaluate_mock_race(
     
     total_bet = sum(bets.values()) if bets else 0
     logger.info(f"🚀 [MOCK] 最適化選出買い目数: {len(bets)}点 / 投資総額: {total_bet:,}円")
+    
+    # Supabase 保存
+    try:
+        db_manager.save_race_prediction(
+            race_id=race_id, race_date=date_str, venue_code=venue_code,
+            venue_name=v_name, race_no=race_no, deadline_time="15:25 (MOCK)",
+            top_boat=top_boat, max_p1=max_p1, prob_gap=prob_gap, gatekeeper_passed=True,
+            cluster_id=cluster_id, cluster_name=cluster_name, status="mock_investment_go"
+        )
+        if bets:
+            db_manager.save_recommended_bets(race_id, bets, benter_probs_dict, all_odds)
+    except Exception as e:
+        logger.warning(f"MOCK推論結果のDB保存例外: {e}")
     
     if bets:
         send_discord_notification(
@@ -1192,6 +1272,12 @@ def run_worker_loop(
     else:
         logger.warning("⚠️ Discord Webhook: 未設定 (ドライラン表示のみ行います)")
         
+    # データベースの初期化 & マイグレーション確認
+    try:
+        db_manager.init_database()
+    except Exception as e:
+        logger.error(f"データベース初期化エラー: {e}")
+        
     # 起動時に即座に当日のスケジュールを登録
     register_daily_schedules(
         bankroll=bankroll,
@@ -1237,6 +1323,12 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
+    # DB初期化
+    try:
+        db_manager.init_database()
+    except Exception as e:
+        logger.warning(f"DB初期化スキップ: {e}")
+        
     webhook = DISCORD_WEBHOOK_URL
     if args.dry_run:
         webhook = ''
