@@ -21,14 +21,18 @@ from typing import Dict, List, Tuple, Optional, Any
 
 import requests
 from bs4 import BeautifulSoup
-from dotenv import load_dotenv
 import schedule
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
 
-# 環境変数の読み込み (.env)
-load_dotenv()
+# 環境変数の読み込み (.env があればロード)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
 DISCORD_WEBHOOK_URL = os.getenv('DISCORD_WEBHOOK_URL', '')
 
 # 自作モジュールのインポート

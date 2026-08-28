@@ -15,12 +15,28 @@ import logging
 import urllib.parse
 from typing import Dict, List, Tuple, Optional, Any, Union
 
-from dotenv import load_dotenv
-
-# 環境変数ロード
-load_dotenv()
+# 環境変数の安全なロード (.env があれば読み込む)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
 
 logger = logging.getLogger("DBManager")
+
+def get_database_url() -> str:
+    """
+    環境変数または Streamlit Secrets から DATABASE_URL を取得
+    """
+    url = os.getenv('DATABASE_URL', '')
+    if not url:
+        try:
+            import streamlit as st
+            if hasattr(st, 'secrets') and 'DATABASE_URL' in st.secrets:
+                url = st.secrets['DATABASE_URL']
+        except Exception:
+            pass
+    return url
 
 # PostgreSQL ドライバの安全なインポート
 try:
@@ -33,7 +49,7 @@ except ImportError:
 
 import sqlite3
 
-DATABASE_URL = os.getenv('DATABASE_URL', '')
+DATABASE_URL = get_database_url()
 SQLITE_DB_PATH = 'boatrace.db'
 
 
@@ -111,7 +127,7 @@ def get_db_connection() -> DBConnection:
     """
     PostgreSQL (Supabase) への接続を優先確立し、未設定時は SQLite にフォールバック
     """
-    db_url = os.getenv('DATABASE_URL', '')
+    db_url = get_database_url()
     
     if db_url and HAS_PSYCOPG2:
         params = parse_database_url(db_url)

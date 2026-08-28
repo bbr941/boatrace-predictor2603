@@ -13,3 +13,6 @@ optuna
 tabpfn==0.1.9
 sqlalchemy
 tqdm
+psycopg2-binary
+schedule
+python-dotenv
