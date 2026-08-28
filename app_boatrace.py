@@ -116,7 +116,7 @@ class BoatRaceScraper:
     def get_odds(date_str, venue_code, race_no):
         """直前3連単オッズ（全120通り）をスクレイピング"""
         jcd = f"{int(venue_code):02d}"
-        url = f"https://www.boatrace.jp/owpc/pc/race/oddstf?rno={race_no}&jcd={jcd}&hd={date_str}"
+        url = f"https://www.boatrace.jp/owpc/pc/race/odds3t?rno={race_no}&jcd={jcd}&hd={date_str}"
         soup = BoatRaceScraper.get_soup(url)
         odds_data = {}
         if soup:
