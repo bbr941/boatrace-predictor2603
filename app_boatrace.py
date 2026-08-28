@@ -638,6 +638,12 @@ def prepare_features_for_model(df_feat, model):
 # 2. Sidebar Navigation & Global Controls
 # =====================================================================
 
+# DB 初期化 (自動マイグレーション)
+try:
+    db_manager.init_database()
+except Exception:
+    pass
+
 st.sidebar.title("🚤 BOATRACE AI Dual Quant")
 
 # 操作モード切替
@@ -655,6 +661,7 @@ with db_manager.get_db_connection() as db:
         st.sidebar.success("🟢 Supabase (PostgreSQL 17) 接続中")
     else:
         st.sidebar.info("📁 SQLite (Local DB) 接続中")
+        st.sidebar.caption("💡 Supabaseと同期するには、Streamlit Cloudの [Secrets] に `DATABASE_URL` を設定してください。")
 
 if st.sidebar.button("🧹 キャッシュクリア (Clear Cache)", use_container_width=True):
     st.cache_data.clear()

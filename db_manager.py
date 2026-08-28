@@ -531,43 +531,58 @@ def get_recommended_bets(race_id: str) -> List[Dict[str, Any]]:
 
 def get_dashboard_stats(date_str: Optional[str] = None) -> Dict[str, Any]:
     """
-    ダッシュボード用の KPI 統計集計
+    ダッシュボード用の KPI 統計集計 (テーブル未存在時は自動初期化 & セーフフォールバック)
     """
-    with get_db_connection() as db:
-        cur = db.cursor()
-        ph = "%s" if db.is_postgres else "?"
-        
-        where_clause = ""
-        params = []
-        if date_str:
-            where_clause = f"WHERE race_date = {ph}"
-            params.append(date_str)
+    default_stats = {
+        'total_evaluated': 0,
+        'gatekeeper_passed': 0,
+        'gatekeeper_rate': 0.0,
+        'investment_go': 0,
+        'total_recommended_bet': 0
+    }
+    try:
+        with get_db_connection() as db:
+            cur = db.cursor()
+            ph = "%s" if db.is_postgres else "?"
             
-        # 1. 評価総数
-        cur.execute(f"SELECT COUNT(*) FROM race_predictions {where_clause};", params)
-        total_eval = cur.fetchone()[0] or 0
-        
-        # 2. Gatekeeper 通過数
-        gk_condition = "gatekeeper_passed = TRUE" if db.is_postgres else "gatekeeper_passed = 1"
-        cur.execute(f"SELECT COUNT(*) FROM race_predictions {where_clause + (' AND ' if where_clause else 'WHERE ')} {gk_condition};", params)
-        gk_passed = cur.fetchone()[0] or 0
-        
-        # 3. 投資GOサイン数
-        cur.execute(f"SELECT COUNT(*) FROM race_predictions {where_clause + (' AND ' if where_clause else 'WHERE ')} (status = 'investment_go' OR status = 'mock_investment_go');", params)
-        go_count = cur.fetchone()[0] or 0
-        
-        # 4. 推奨投資総額
-        join_clause = f"JOIN race_predictions p ON b.race_id = p.race_id {where_clause.replace('race_date', 'p.race_date')}" if date_str else ""
-        cur.execute(f"SELECT COALESCE(SUM(b.bet_amount), 0) FROM recommended_bets b {join_clause};", params)
-        total_bet = cur.fetchone()[0] or 0
-        
-        return {
-            'total_evaluated': total_eval,
-            'gatekeeper_passed': gk_passed,
-            'gatekeeper_rate': (gk_passed / total_eval) if total_eval > 0 else 0.0,
-            'investment_go': go_count,
-            'total_recommended_bet': int(total_bet)
-        }
+            where_clause = ""
+            params = []
+            if date_str:
+                where_clause = f"WHERE race_date = {ph}"
+                params.append(date_str)
+                
+            # 1. 評価総数
+            cur.execute(f"SELECT COUNT(*) FROM race_predictions {where_clause};", params)
+            total_eval = cur.fetchone()[0] or 0
+            
+            # 2. Gatekeeper 通過数
+            gk_condition = "gatekeeper_passed = TRUE" if db.is_postgres else "gatekeeper_passed = 1"
+            cur.execute(f"SELECT COUNT(*) FROM race_predictions {where_clause + (' AND ' if where_clause else 'WHERE ')} {gk_condition};", params)
+            gk_passed = cur.fetchone()[0] or 0
+            
+            # 3. 投資GOサイン数
+            cur.execute(f"SELECT COUNT(*) FROM race_predictions {where_clause + (' AND ' if where_clause else 'WHERE ')} (status = 'investment_go' OR status = 'mock_investment_go');", params)
+            go_count = cur.fetchone()[0] or 0
+            
+            # 4. 推奨投資総額
+            join_clause = f"JOIN race_predictions p ON b.race_id = p.race_id {where_clause.replace('race_date', 'p.race_date')}" if date_str else ""
+            cur.execute(f"SELECT COALESCE(SUM(b.bet_amount), 0) FROM recommended_bets b {join_clause};", params)
+            total_bet = cur.fetchone()[0] or 0
+            
+            return {
+                'total_evaluated': total_eval,
+                'gatekeeper_passed': gk_passed,
+                'gatekeeper_rate': (gk_passed / total_eval) if total_eval > 0 else 0.0,
+                'investment_go': go_count,
+                'total_recommended_bet': int(total_bet)
+            }
+    except Exception as e:
+        logger.warning(f"get_dashboard_stats例外: {e} -> テーブル自動初期化を試行します...")
+        try:
+            init_database()
+        except Exception:
+            pass
+        return default_stats
 
 
 def get_all_predictions_with_bets(
@@ -577,97 +592,113 @@ def get_all_predictions_with_bets(
     limit: int = 100
 ) -> List[Dict[str, Any]]:
     """
-    推論結果と対応する推奨買い目を結合して取得
+    推論結果と対応する推奨買い目を結合して取得 (テーブル未存在時は自動初期化 & セーフフォールバック)
     """
-    with get_db_connection() as db:
-        cur = db.cursor()
-        ph = "%s" if db.is_postgres else "?"
-        
-        conditions = []
-        params = []
-        
-        if date_str:
-            conditions.append(f"p.race_date = {ph}")
-            params.append(date_str)
-        if status_filter and status_filter != 'all':
-            if status_filter == 'investment_go':
-                conditions.append(f"(p.status = 'investment_go' OR p.status = 'mock_investment_go')")
-            elif status_filter == 'gatekeeper_passed':
-                conditions.append("p.gatekeeper_passed = TRUE" if db.is_postgres else "p.gatekeeper_passed = 1")
-            else:
-                conditions.append(f"p.status = {ph}")
-                params.append(status_filter)
-        if venue_filter and venue_filter != 'all':
-            conditions.append(f"p.venue_name = {ph}")
-            params.append(venue_filter)
+    try:
+        with get_db_connection() as db:
+            cur = db.cursor()
+            ph = "%s" if db.is_postgres else "?"
             
-        where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        params.append(limit)
-        
-        query = f"""
-        SELECT p.race_id, p.race_date, p.venue_code, p.venue_name, p.race_no,
-               p.deadline_time, p.top_boat, p.max_p1, p.prob_gap, p.gatekeeper_passed,
-               p.cluster_id, p.cluster_name, p.status, p.created_at
-        FROM race_predictions p
-        {where_sql}
-        ORDER BY p.created_at DESC
-        LIMIT {ph};
-        """
-        cur.execute(query, params)
-        cols = [desc[0] for desc in cur.description]
-        races = [dict(zip(cols, row)) for row in cur.fetchall()]
-        
-        # 買い目を紐付け
-        if races:
-            race_ids = [r['race_id'] for r in races]
-            in_ph = ','.join([ph] * len(race_ids))
-            cur.execute(f"""
-                SELECT race_id, combination, bet_amount, prob, odds, ev, expected_return
-                FROM recommended_bets
-                WHERE race_id IN ({in_ph})
-                ORDER BY bet_amount DESC;
-            """, race_ids)
-            bet_cols = [desc[0] for desc in cur.description]
-            all_bets = [dict(zip(bet_cols, row)) for row in cur.fetchall()]
+            conditions = []
+            params = []
             
-            bets_by_race = {}
-            for b in all_bets:
-                rid = b['race_id']
-                if rid not in bets_by_race:
-                    bets_by_race[rid] = []
-                bets_by_race[rid].append(b)
+            if date_str:
+                conditions.append(f"p.race_date = {ph}")
+                params.append(date_str)
+            if status_filter and status_filter != 'all':
+                if status_filter == 'investment_go':
+                    conditions.append(f"(p.status = 'investment_go' OR p.status = 'mock_investment_go')")
+                elif status_filter == 'gatekeeper_passed':
+                    conditions.append("p.gatekeeper_passed = TRUE" if db.is_postgres else "p.gatekeeper_passed = 1")
+                else:
+                    conditions.append(f"p.status = {ph}")
+                    params.append(status_filter)
+            if venue_filter and venue_filter != 'all':
+                conditions.append(f"p.venue_name = {ph}")
+                params.append(venue_filter)
                 
-            for r in races:
-                r['bets'] = bets_by_race.get(r['race_id'], [])
-                r['total_bet'] = sum(b['bet_amount'] for b in r['bets'])
-                r['max_return'] = max([b['expected_return'] for b in r['bets']]) if r['bets'] else 0
-        return races
+            where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+            params.append(limit)
+            
+            query = f"""
+            SELECT p.race_id, p.race_date, p.venue_code, p.venue_name, p.race_no,
+                   p.deadline_time, p.top_boat, p.max_p1, p.prob_gap, p.gatekeeper_passed,
+                   p.cluster_id, p.cluster_name, p.status, p.created_at
+            FROM race_predictions p
+            {where_sql}
+            ORDER BY p.created_at DESC
+            LIMIT {ph};
+            """
+            cur.execute(query, params)
+            cols = [desc[0] for desc in cur.description]
+            races = [dict(zip(cols, row)) for row in cur.fetchall()]
+            
+            # 買い目を紐付け
+            if races:
+                race_ids = [r['race_id'] for r in races]
+                in_ph = ','.join([ph] * len(race_ids))
+                cur.execute(f"""
+                    SELECT race_id, combination, bet_amount, prob, odds, ev, expected_return
+                    FROM recommended_bets
+                    WHERE race_id IN ({in_ph})
+                    ORDER BY bet_amount DESC;
+                """, race_ids)
+                bet_cols = [desc[0] for desc in cur.description]
+                all_bets = [dict(zip(bet_cols, row)) for row in cur.fetchall()]
+                
+                bets_by_race = {}
+                for b in all_bets:
+                    rid = b['race_id']
+                    if rid not in bets_by_race:
+                        bets_by_race[rid] = []
+                    bets_by_race[rid].append(b)
+                    
+                for r in races:
+                    r['bets'] = bets_by_race.get(r['race_id'], [])
+                    r['total_bet'] = sum(b['bet_amount'] for b in r['bets'])
+                    r['max_return'] = max([b['expected_return'] for b in r['bets']]) if r['bets'] else 0
+            return races
+    except Exception as e:
+        logger.warning(f"get_all_predictions_with_bets例外: {e} -> テーブル自動初期化を試行します...")
+        try:
+            init_database()
+        except Exception:
+            pass
+        return []
 
 
 def get_notification_logs(limit: int = 50) -> List[Dict[str, Any]]:
     """
-    通知ログを取得
+    通知ログを取得 (セーフフォールバック付き)
     """
-    with get_db_connection() as db:
-        cur = db.cursor()
-        ph = "%s" if db.is_postgres else "?"
-        query = f"""
-        SELECT id, race_id, channel, title, message_payload, status, created_at
-        FROM notification_logs
-        ORDER BY created_at DESC
-        LIMIT {ph};
-        """
-        cur.execute(query, (limit,))
-        cols = [desc[0] for desc in cur.description]
-        rows = cur.fetchall()
-        result = []
-        for row in rows:
-            d = dict(zip(cols, row))
-            if isinstance(d.get('message_payload'), str):
-                try: d['message_payload'] = json.loads(d['message_payload'])
-                except Exception: pass
-            result.append(d)
-        return result
+    try:
+        with get_db_connection() as db:
+            cur = db.cursor()
+            ph = "%s" if db.is_postgres else "?"
+            query = f"""
+            SELECT id, race_id, channel, title, message_payload, status, created_at
+            FROM notification_logs
+            ORDER BY created_at DESC
+            LIMIT {ph};
+            """
+            cur.execute(query, (limit,))
+            cols = [desc[0] for desc in cur.description]
+            rows = cur.fetchall()
+            result = []
+            for row in rows:
+                d = dict(zip(cols, row))
+                if isinstance(d.get('message_payload'), str):
+                    try: d['message_payload'] = json.loads(d['message_payload'])
+                    except Exception: pass
+                result.append(d)
+            return result
+    except Exception as e:
+        logger.warning(f"get_notification_logs例外: {e}")
+        try:
+            init_database()
+        except Exception:
+            pass
+        return []
 
 
 if __name__ == "__main__":
