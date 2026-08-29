@@ -560,8 +560,8 @@ def get_dashboard_stats(date_str: Optional[str] = None) -> Dict[str, Any]:
             cur.execute(f"SELECT COUNT(*) FROM race_predictions {where_clause + (' AND ' if where_clause else 'WHERE ')} {gk_condition};", params)
             gk_passed = cur.fetchone()[0] or 0
             
-            # 3. 投資GOサイン数
-            cur.execute(f"SELECT COUNT(*) FROM race_predictions {where_clause + (' AND ' if where_clause else 'WHERE ')} (status = 'investment_go' OR status = 'mock_investment_go');", params)
+            # 3. 投資GOサイン数 (ガチ投資・エンタメ・的中特化を含む)
+            cur.execute(f"SELECT COUNT(*) FROM race_predictions {where_clause + (' AND ' if where_clause else 'WHERE ')} status IN ('investment_go', 'mock_investment_go', 'entertainment_go', 'hit_focused_go');", params)
             go_count = cur.fetchone()[0] or 0
             
             # 4. 推奨投資総額
@@ -607,7 +607,7 @@ def get_all_predictions_with_bets(
                 params.append(date_str)
             if status_filter and status_filter != 'all':
                 if status_filter == 'investment_go':
-                    conditions.append(f"(p.status = 'investment_go' OR p.status = 'mock_investment_go')")
+                    conditions.append("p.status IN ('investment_go', 'mock_investment_go', 'entertainment_go', 'hit_focused_go')")
                 elif status_filter == 'gatekeeper_passed':
                     conditions.append("p.gatekeeper_passed = TRUE" if db.is_postgres else "p.gatekeeper_passed = 1")
                 else:

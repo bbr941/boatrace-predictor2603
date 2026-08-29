@@ -851,6 +851,8 @@ if app_mode == "📊 自動運用ダッシュボード (Auto Dashboard)":
             status_badge = {
                 'investment_go': '🚀 投資GO',
                 'mock_investment_go': '🧪 投資GO(Mock)',
+                'entertainment_go': '🍿 エンタメGO',
+                'hit_focused_go': '🎯 的中特化GO',
                 'gatekeeper_skipped': '☕ GK未達',
                 'skipped_cluster1': '🛑 難水面除外',
                 'no_value_bets': '🔍 EV未達'
@@ -892,16 +894,63 @@ if app_mode == "📊 自動運用ダッシュボード (Auto Dashboard)":
 
 
 # =====================================================================
+# =====================================================================
 # 4. Mode B: 🎯 マニュアル推論 (Manual Mode)
 # =====================================================================
 
 else:
     st.title("🎯 マニュアル推論 & ポートフォリオ最適化")
-    st.caption("任意のレースを指定し、Gatekeeper閾値やBenterパラメーターを手動調整して即時分析")
+    st.caption("任意のレースを指定し、目的に合わせた3つのプリセットモードで即時分析")
 
     today = datetime.date.today()
     
-    # サイドバー操作
+    # サイドバー: プレイモード選択
+    st.sidebar.header("🎯 プレイモード選択 (Preset)")
+    play_mode = st.sidebar.radio(
+        "投資スタイルを選択",
+        [
+            "🏆 ガチ投資（黄金ベースライン）",
+            "🍿 エンタメ（多参戦・微バリュー）",
+            "🎯 的中特化（確率上位5点買い）"
+        ],
+        index=0,
+        help=(
+            "・🏆 ガチ投資: 厳格なGatekeeper足切り(P1>=74.38%)、難水面スキップ、EV>=1.25で長期期待値を最大化。\n"
+            "・🍿 エンタメ: 全水面参戦、Gatekeeper制限解除、EV>=1.05で高回転勝負。\n"
+            "・🎯 的中特化: EV・オッズ無視でAIが予測した展開確率TOP5に均等100円投資。"
+        )
+    )
+
+    # プリセットモードごとの基本パラメーター設定
+    if play_mode == "🏆 ガチ投資（黄金ベースライン）":
+        mode_key = "honmei_quant"
+        mode_badge_html = '<span class="badge-win" style="background-color:#00E676; color:#000; font-size:1.0em; padding:5px 12px; font-weight:700;">🏆 ガチ投資モード（黄金ベースライン）</span>'
+        default_gk_th = 0.7438
+        skip_cluster1 = True
+        default_min_ev = 1.25
+        default_max_odds = 30.0
+        status_success_name = "investment_go"
+
+    elif play_mode == "🍿 エンタメ（多参戦・微バリュー）":
+        mode_key = "entertainment"
+        mode_badge_html = '<span class="badge-win" style="background-color:#FF9100; color:#fff; font-size:1.0em; padding:5px 12px; font-weight:700;">🍿 エンタメモード（多参戦・微バリュー）</span>'
+        default_gk_th = 0.0000
+        skip_cluster1 = False
+        default_min_ev = 1.05
+        default_max_odds = 100.0
+        status_success_name = "entertainment_go"
+
+    else:  # "🎯 的中特化（確率上位5点買い）"
+        mode_key = "hit_focused"
+        mode_badge_html = '<span class="badge-win" style="background-color:#D500F9; color:#fff; font-size:1.0em; padding:5px 12px; font-weight:700;">🎯 的中特化モード（確率上位5点買い）</span>'
+        default_gk_th = 0.0000
+        skip_cluster1 = False
+        default_min_ev = 0.00
+        default_max_odds = 999.0
+        status_success_name = "hit_focused_go"
+
+    # サイドバー: 対象レース指定
+    st.sidebar.markdown("---")
     st.sidebar.header("🎯 対象レース指定")
     target_date = st.sidebar.date_input("開催日 (Date)", today)
     venue_code = st.sidebar.selectbox("開催場 (Venue)", list(VENUE_MAP.keys()), format_func=lambda x: f"{x:02d}: {VENUE_MAP[x]}")
@@ -910,28 +959,23 @@ else:
 
     debug_mode = st.sidebar.checkbox("デバッグ情報を表示", value=False)
 
-    st.sidebar.markdown("---")
-    st.sidebar.header("🛡️ Gatekeeper スクリーニング")
-    gatekeeper_th = st.sidebar.slider(
-        "信頼度判定カットオフ (P1 閾値)",
-        min_value=0.40,
-        max_value=0.90,
-        value=0.7438,
-        step=0.005,
-        format="%.4f",
-        help="Gatekeeper（model_honmei.txt）の1着確率P1がこの値以上のレースのみを勝負レースとして抽出します（黄金ベースライン: 74.38%）。"
-    )
-
+    # サイドバー: 水面クラスタ情報
     st.sidebar.markdown("---")
     st.sidebar.header("🏟️ 水面クラスタ & Benter設定")
     cluster_d2, cluster_d3, cluster_id, cluster_name = get_cluster_benter_params(venue_code)
 
     if venue_code in CLUSTER_1_VENUES:
-        st.sidebar.warning(
-            f"⚠️ **水面区分:** {cluster_name} (Cluster {cluster_id})\n\n"
-            f"🚨 **難水面除外システム作動中**\n\n"
-            f"この会場（戸田・江戸川・平和島・鳴門・福岡）は波乱リスクが高いため、投資純度保護の観点から推論・投資がスキップされます。"
-        )
+        if skip_cluster1:
+            st.sidebar.warning(
+                f"⚠️ **水面区分:** {cluster_name} (Cluster {cluster_id})\n\n"
+                f"🚨 **難水面除外システム作動中**\n\n"
+                f"この会場（戸田・江戸川・平和島・鳴門・福岡）は波乱リスクが高いため、ガチ投資モードでは推論・投資がスキップされます。"
+            )
+        else:
+            st.sidebar.info(
+                f"⚠️ **水面区分:** {cluster_name} (Cluster {cluster_id})\n\n"
+                f"ℹ️ 難水面ですが、現在のモード（{play_mode}）では全水面参戦のため推論を実行します。"
+            )
     else:
         st.sidebar.info(
             f"**水面区分:** {cluster_name} (Cluster {cluster_id})\n\n"
@@ -947,20 +991,53 @@ else:
         d2_effective = st.sidebar.slider("2着 減衰パラメーター (d2)", min_value=0.05, max_value=1.50, value=float(cluster_d2), step=0.05)
         d3_effective = st.sidebar.slider("3着 減衰パラメーター (d3)", min_value=0.05, max_value=1.50, value=float(cluster_d3), step=0.05)
 
+    # モードに応じたパラメーター入力セクション
     st.sidebar.markdown("---")
-    st.sidebar.header("💰 資金配分戦略 (Portfolio Strategy)")
+    if mode_key == "hit_focused":
+        st.sidebar.header("🎯 的中特化 設定")
+        top_n_bets = st.sidebar.slider("抽出点数 (上位N点)", min_value=1, max_value=10, value=5, step=1)
+        fixed_bet_amount = st.sidebar.number_input("1点あたり投資額 (円)", min_value=100, max_value=10000, value=100, step=100)
+        gatekeeper_th = 0.0
+        bankroll = 100000.0
+        risk_aversion = 1.0
+        min_ev = 0.0
+        max_odds = 999.0
+        strategy_choice = "均等配分 (Fixed 100円)"
+    else:
+        st.sidebar.header("🛡️ Gatekeeper & 資金配分設定")
+        
+        # ガチ投資モードとエンタメモードでの Gatekeeper 閾値
+        if mode_key == "honmei_quant":
+            gatekeeper_th = st.sidebar.slider(
+                "信頼度判定カットオフ (P1 閾値)",
+                min_value=0.40,
+                max_value=0.90,
+                value=float(default_gk_th),
+                step=0.005,
+                format="%.4f",
+                help="Gatekeeper（model_honmei.txt）の1着確率P1がこの値以上のレースのみを勝負レースとして抽出します（黄金ベースライン: 74.38%）。"
+            )
+        else:  # entertainment
+            gatekeeper_th = st.sidebar.slider(
+                "信頼度判定カットオフ (P1 閾値)",
+                min_value=0.00,
+                max_value=0.90,
+                value=0.00,
+                step=0.05,
+                format="%.2f",
+                help="エンタメモード: 0.00（足切りなし）で全レース参戦可能。"
+            )
 
-    strategy_choice = st.sidebar.radio(
-        "資金配分モデル",
-        ["固定ウェイト上限 (Max 5%)", "クォーター・ケリー (Fractional Kelly f=0.25)"],
-        index=0,
-        help="固定ウェイト上限: レース総投資額を一律上限5%（買い目上限2%）に制限。\nクォーター・ケリー: 候補買い目のエッジ合計に応じレース投資比率を動的決定（上限10%）。"
-    )
+        strategy_choice = st.sidebar.radio(
+            "資金配分モデル",
+            ["固定ウェイト上限 (Max 5%)", "クォーター・ケリー (Fractional Kelly f=0.25)"],
+            index=0
+        )
 
-    bankroll = st.sidebar.number_input("想定バンクロール (円)", min_value=10000, max_value=10000000, value=100000, step=10000)
-    risk_aversion = st.sidebar.slider("リスク回避度 (λ)", min_value=0.1, max_value=5.0, value=1.0, step=0.1)
-    min_ev = st.sidebar.number_input("最小期待値閾値 (Min EV)", min_value=1.00, max_value=3.00, value=1.25, step=0.05)
-    max_odds = st.sidebar.number_input("最大オッズ上限 (Max Odds)", min_value=5.0, max_value=200.0, value=30.0, step=5.0)
+        bankroll = st.sidebar.number_input("想定バンクロール (円)", min_value=10000, max_value=10000000, value=100000, step=10000)
+        risk_aversion = st.sidebar.slider("リスク回避度 (λ)", min_value=0.1, max_value=5.0, value=1.0, step=0.1)
+        min_ev = st.sidebar.number_input("最小期待値閾値 (Min EV)", min_value=0.50, max_value=3.00, value=float(default_min_ev), step=0.05)
+        max_odds = st.sidebar.number_input("最大オッズ上限 (Max Odds)", min_value=5.0, max_value=500.0, value=float(default_max_odds), step=5.0)
 
     # 推論実行ボタン
     if st.button("🚀 レース分析 & 最適買い目算出 (Analyze Race)", type="primary", use_container_width=True):
@@ -970,10 +1047,13 @@ else:
         date_str = target_date.strftime("%Y%m%d")
         race_id = f"{date_str}_{venue_code}_{race_no}"
         
-        # 難水面（Cluster 1）除外チェック
-        if venue_code in CLUSTER_1_VENUES:
-            st.error(f"🛑 【参戦見送り】{venue_name} は難水面（Cluster 1: 波乱場）に該当するため、システム保護により推論・投資を即時スキップしました。")
-            st.info("💡 黄金ベースラインのバックテスト検証に基づき、イン勝率が安定した標準水面（Cluster 2）およびイン超強水面（Cluster 0）に投資資金を集中させます。")
+        # モードバッジ表示
+        st.markdown(f"<div style='margin-bottom:12px;'>{mode_badge_html}</div>", unsafe_allow_html=True)
+        
+        # 難水面（Cluster 1）除外チェック (ガチ投資モードのみ)
+        if skip_cluster1 and (venue_code in CLUSTER_1_VENUES):
+            st.error(f"🛑 【参戦見送り】{venue_name} は難水面（Cluster 1: 波乱場）に該当するため、ガチ投資モードのシステム保護により推論・投資を即時スキップしました。")
+            st.info("💡 黄金ベースラインのバックテスト検証に基づき、イン勝率が安定した標準水面（Cluster 2）およびイン超強水面（Cluster 0）に投資資金を集中させます。\n\n※ 全会場で参戦したい場合は「🍿 エンタメモード」または「🎯 的中特化モード」をご利用ください。")
             
             try:
                 db_manager.save_race_prediction(
@@ -1048,11 +1128,11 @@ else:
         with col_g1:
             st.metric("本命艇 (Top Boat)", f"{top_boat} 号艇")
         with col_g2:
-            st.metric("Gatekeeper 1着確率 (P1)", f"{max_p1:.2%}", delta=f"閾値差: {max_p1 - gatekeeper_th:+.2%}")
+            st.metric("Gatekeeper 1着確率 (P1)", f"{max_p1:.2%}", delta=f"閾値差: {max_p1 - gatekeeper_th:+.2%}" if gatekeeper_th > 0 else None)
         with col_g3:
             st.metric("2位との勝率差 (Prob Gap)", f"{prob_gap:+.2%}")
             
-        if max_p1 < gatekeeper_th:
+        if max_p1 < gatekeeper_th and gatekeeper_th > 0.0:
             st.warning(f"☕ **【参戦見送り】** Gatekeeperの信頼度スコア ({max_p1:.2%}) が基準値 ({gatekeeper_th:.2%}) に満たないため、このレースは投資対象外（No Bet）です。")
             try:
                 db_manager.save_race_prediction(
@@ -1064,7 +1144,10 @@ else:
             except Exception: pass
             st.stop()
             
-        st.success(f"🎯 **【Gatekeeper 通過】** 信頼度スコア {max_p1:.2%} ≧ {gatekeeper_th:.2%}！ 勝負レース判定。第2段階（Extractor & ポートフォリオ最適化）を実行します。")
+        if gatekeeper_th > 0.0:
+            st.success(f"🎯 **【Gatekeeper 通過】** 信頼度スコア {max_p1:.2%} ≧ {gatekeeper_th:.2%}！ 勝負レース判定。第2段階（Extractor & 最適化）を実行します。")
+        else:
+            st.info(f"⚡ **【Gatekeeper 制限解除】** 信頼度スコア {max_p1:.2%}。{play_mode} に従い第2段階（Extractor推論 & 買い目選出）を実行します。")
         
         # Extractor 推論
         model_r = lgb.Booster(model_file=MODEL_RESIDUAL_PATH)
@@ -1084,25 +1167,32 @@ else:
         )
         benter_probs_dict = {p['combo']: p['prob'] for p in benter_probs}
 
-        # ポートフォリオ最適化
-        optimizer = PortfolioOptimizer()
-        kelly_param = 0.25 if "ケリー" in strategy_choice else None
-        
-        bets = optimizer.optimize_funds(
-            probabilities=benter_probs_dict,
-            odds=all_odds,
-            bankroll=float(bankroll),
-            risk_aversion=float(risk_aversion),
-            max_exposure=0.05,
-            max_concentration=0.02,
-            min_ev=float(min_ev),
-            max_odds=float(max_odds),
-            kelly_fraction=kelly_param
-        )
+        # 買い目選出 & 資金配分
+        if mode_key == "hit_focused":
+            # 的中特化モード: Benter 確率上位 N 点を抽出
+            sorted_by_prob = sorted(benter_probs_dict.items(), key=lambda x: x[1], reverse=True)
+            top_combos = sorted_by_prob[:top_n_bets]
+            bets = {c: int(fixed_bet_amount) for c, _ in top_combos}
+        else:
+            # ガチ投資 & エンタメモード: ポートフォリオ最適化 (SLSQP / Markowitz)
+            optimizer = PortfolioOptimizer()
+            kelly_param = 0.25 if "ケリー" in strategy_choice else None
+            
+            bets = optimizer.optimize_funds(
+                probabilities=benter_probs_dict,
+                odds=all_odds,
+                bankroll=float(bankroll),
+                risk_aversion=float(risk_aversion),
+                max_exposure=0.05,
+                max_concentration=0.02,
+                min_ev=float(min_ev),
+                max_odds=float(max_odds),
+                kelly_fraction=kelly_param
+            )
         
         # 結果表示
         st.markdown("---")
-        st.subheader("🚀 第2段階: ポートフォリオ最適化 結果")
+        st.subheader("🚀 第2段階: 推奨買い目 & 資金配分 結果")
         
         if bets:
             total_bet = sum(bets.values())
@@ -1110,11 +1200,11 @@ else:
             
             r1, r2, r3 = st.columns(3)
             with r1: st.metric("推奨選出 買い目数", f"{len(bets)} 点")
-            with r2: st.metric("推奨投資総額", f"{total_bet:,} 円", delta=f"資金比率: {total_bet/bankroll:.1%}")
+            with r2: st.metric("推奨投資総額", f"{total_bet:,} 円", delta=f"資金比率: {total_bet/bankroll:.1%}" if mode_key != "hit_focused" else None)
             with r3: st.metric("最高払戻見込額", f"{int(max_ret):,} 円")
             
             res_rows = []
-            for combo, amt in sorted(bets.items(), key=lambda x: x[1], reverse=True):
+            for combo, amt in sorted(bets.items(), key=lambda x: (x[1], benter_probs_dict.get(x[0], 0.0)), reverse=True):
                 p = benter_probs_dict.get(combo, 0.0)
                 o = all_odds.get(combo, 0.0)
                 ev = p * o
@@ -1123,9 +1213,9 @@ else:
                     '買い目': combo,
                     '推奨投資額 (円)': f"{amt:,} 円",
                     'Benter確率': f"{p:.2%}",
-                    '実オッズ': f"{o:.1f} 倍",
+                    '実オッズ': f"{o:.1f} 倍" if o > 0 else "-",
                     'EV (期待値)': f"{ev:.2f}",
-                    '払戻見込 (円)': f"{est_ret:,} 円"
+                    '払戻見込 (円)': f"{est_ret:,} 円" if o > 0 else "-"
                 })
             st.dataframe(pd.DataFrame(res_rows), use_container_width=True, hide_index=True)
             
@@ -1135,14 +1225,14 @@ else:
                     race_id=race_id, race_date=date_str, venue_code=venue_code,
                     venue_name=venue_name, race_no=race_no, deadline_time="マニュアル",
                     top_boat=top_boat, max_p1=max_p1, prob_gap=prob_gap, gatekeeper_passed=True,
-                    cluster_id=cluster_id, cluster_name=cluster_name, status="investment_go"
+                    cluster_id=cluster_id, cluster_name=cluster_name, status=status_success_name
                 )
                 db_manager.save_recommended_bets(race_id, bets, benter_probs_dict, all_odds)
-                st.caption("💾 推論結果および推奨買い目を Supabase データベースに自動保存しました。")
+                st.caption(f"💾 推論結果および推奨買い目を Supabase データベースに自動保存しました (Status: `{status_success_name}`)。")
             except Exception as e:
                 st.caption(f"⚠️ DB保存例外: {e}")
         else:
-            st.info(f"🔍 Gatekeeper は通過しましたが、厳格化条件（EV ≧ {min_ev:.2f}, Odds ≦ {max_odds:.1f}）を満たす期待値プラスの買い目が存在しないため、投資見送り（No Bet）となります。")
+            st.info(f"🔍 Gatekeeper は通過しましたが、設定条件（EV ≧ {min_ev:.2f}, Odds ≦ {max_odds:.1f}）を満たす期待値プラスの買い目が存在しないため、投資見送り（No Bet）となります。")
             try:
                 db_manager.save_race_prediction(
                     race_id=race_id, race_date=date_str, venue_code=venue_code,
@@ -1151,3 +1241,4 @@ else:
                     cluster_id=cluster_id, cluster_name=cluster_name, status="no_value_bets"
                 )
             except Exception: pass
+
