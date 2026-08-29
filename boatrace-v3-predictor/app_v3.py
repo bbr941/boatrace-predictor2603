@@ -12,10 +12,18 @@ app_boatrace.py
 import os
 import sys
 
+# Ensure repository root and current directory are in sys.path
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+PARENT_DIR = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
+for p in [CURRENT_DIR, PARENT_DIR]:
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
 # Force single thread to prevent Streamlit Cloud crashes (OpenMP)
 os.environ['OMP_NUM_THREADS'] = '1'
 
 import streamlit as st
+
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
@@ -854,44 +862,59 @@ if app_mode == "📊 自動運用ダッシュボード (Auto Dashboard)":
             st.rerun()
 
     # KPI メトリクス
-    stats = db_manager.get_dashboard_stats(selected_date)
+    stats = db_manager.get_dashboard_stats(selected_date) or {}
+    
+    net_profit = stats.get('net_profit', 0)
+    resolved_bet = stats.get('resolved_bet', 0)
+    total_payout = stats.get('total_payout', 0)
+    recovery_rate = stats.get('recovery_rate', 0.0)
+    resolved_races = stats.get('resolved_races', 0)
+    hit_rate = stats.get('hit_rate', 0.0)
+    hit_count = stats.get('hit_count', 0)
+    miss_count = stats.get('miss_count', 0)
+    total_evaluated = stats.get('total_evaluated', 0)
+    gatekeeper_passed = stats.get('gatekeeper_passed', 0)
+    gatekeeper_rate = stats.get('gatekeeper_rate', 0.0)
+    investment_go = stats.get('investment_go', 0)
+    total_recommended_bet = stats.get('total_recommended_bet', 0)
     
     st.markdown("### 📈 確定収支 & 運用パフォーマンス サマリー")
     m1, m2, m3, m4 = st.columns(4)
     with m1:
-        profit_color = "#00E676" if stats['net_profit'] > 0 else ("#FF5252" if stats['net_profit'] < 0 else "#FFFFFF")
+        profit_color = "#00E676" if net_profit > 0 else ("#FF5252" if net_profit < 0 else "#FFFFFF")
         st.markdown(f"""
         <div class="metric-card">
             <div style="font-size: 0.85em; color: #888;">💰 確定純損益 (実払戻 - 総投資)</div>
-            <div style="font-size: 1.8em; font-weight: 700; color: {profit_color};">{stats['net_profit']:+,} <span style="font-size:0.5em; font-weight:400;">円</span></div>
-            <div style="font-size: 0.8em; color: #aaa; margin-top: 4px;">総投資: {stats['resolved_bet']:,}円 / 払戻: {stats['total_payout']:,}円</div>
+            <div style="font-size: 1.8em; font-weight: 700; color: {profit_color};">{net_profit:+,} <span style="font-size:0.5em; font-weight:400;">円</span></div>
+            <div style="font-size: 0.8em; color: #aaa; margin-top: 4px;">総投資: {resolved_bet:,}円 / 払戻: {total_payout:,}円</div>
         </div>
         """, unsafe_allow_html=True)
     with m2:
-        rec_color = "#00E676" if stats['recovery_rate'] >= 100.0 else ("#FFD600" if stats['recovery_rate'] > 0 else "#FFFFFF")
+        rec_color = "#00E676" if recovery_rate >= 100.0 else ("#FFD600" if recovery_rate > 0 else "#FFFFFF")
         st.markdown(f"""
         <div class="metric-card">
             <div style="font-size: 0.85em; color: #888;">🎯 確定回収率 (ROI)</div>
-            <div style="font-size: 1.8em; font-weight: 700; color: {rec_color};">{stats['recovery_rate']:.1f} <span style="font-size:0.5em; font-weight:400;">%</span></div>
-            <div style="font-size: 0.8em; color: #aaa; margin-top: 4px;">確定勝負レース数: {stats['resolved_races']:,} R</div>
+            <div style="font-size: 1.8em; font-weight: 700; color: {rec_color};">{recovery_rate:.1f} <span style="font-size:0.5em; font-weight:400;">%</span></div>
+            <div style="font-size: 0.8em; color: #aaa; margin-top: 4px;">確定勝負レース数: {resolved_races:,} R</div>
         </div>
         """, unsafe_allow_html=True)
     with m3:
         st.markdown(f"""
         <div class="metric-card">
             <div style="font-size: 0.85em; color: #888;">🏆 的中率 (Hit Rate)</div>
-            <div style="font-size: 1.8em; font-weight: 700; color: #00E5FF;">{stats['hit_rate']:.1%}</div>
-            <div style="font-size: 0.8em; color: #aaa; margin-top: 4px;">的中: {stats['hit_count']}勝 / 確定: {stats['hit_count'] + stats['miss_count']}R</div>
+            <div style="font-size: 1.8em; font-weight: 700; color: #00E5FF;">{hit_rate:.1%}</div>
+            <div style="font-size: 0.8em; color: #aaa; margin-top: 4px;">的中: {hit_count}勝 / 確定: {hit_count + miss_count}R</div>
         </div>
         """, unsafe_allow_html=True)
     with m4:
         st.markdown(f"""
         <div class="metric-card">
             <div style="font-size: 0.85em; color: #888;">🚀 投資GOサイン点灯数</div>
-            <div style="font-size: 1.8em; font-weight: 700; color: #FFD600;">{stats['investment_go']:,} <span style="font-size:0.5em; font-weight:400;">R</span></div>
-            <div style="font-size: 0.8em; color: #aaa; margin-top: 4px;">分析: {stats['total_evaluated']}R (GK通過: {stats['gatekeeper_rate']:.1%})</div>
+            <div style="font-size: 1.8em; font-weight: 700; color: #FFD600;">{investment_go:,} <span style="font-size:0.5em; font-weight:400;">R</span></div>
+            <div style="font-size: 0.8em; color: #aaa; margin-top: 4px;">分析: {total_evaluated}R (GK通過: {gatekeeper_rate:.1%})</div>
         </div>
         """, unsafe_allow_html=True)
+
 
     st.markdown("---")
 
