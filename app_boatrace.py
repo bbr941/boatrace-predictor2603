@@ -120,21 +120,39 @@ VENUE_MAP = {
 # =====================================================================
 
 class BoatRaceScraper:
-    @staticmethod
-    def get_soup(url):
-        max_retries = 3
+    _session = None
+
+    @classmethod
+    def get_session(cls) -> requests.Session:
+        if cls._session is None:
+            cls._session = requests.Session()
+            cls._session.headers.update({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+                "Connection": "keep-alive"
+            })
+            adapter = requests.adapters.HTTPAdapter(pool_connections=15, pool_maxsize=30, max_retries=3)
+            cls._session.mount("https://", adapter)
+            cls._session.mount("http://", adapter)
+        return cls._session
+
+    @classmethod
+    def get_soup(cls, url: str, timeout: int = 20, max_retries: int = 3):
+        session = cls.get_session()
         for attempt in range(max_retries):
             try:
-                resp = requests.get(url, headers=HEADERS, timeout=15)
+                resp = session.get(url, timeout=timeout)
                 resp.raise_for_status()
-                resp.encoding = resp.apparent_encoding
+                resp.encoding = resp.apparent_encoding or 'utf-8'
                 return BeautifulSoup(resp.text, 'html.parser')
             except Exception as e:
                 if attempt == max_retries - 1:
                     st.error(f"データ取得エラー: {e}")
                     return None
-                time.sleep(1)
+                time.sleep(1.0)
         return None
+
 
     @staticmethod
     def parse_float(text):

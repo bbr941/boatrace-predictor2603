@@ -88,16 +88,40 @@ DEFAULT_GATEKEEPER_TH = 0.7438    # Gatekeeper 黄金ベースライン (85th%)
 # =====================================================================
 
 class BoatRaceScraper:
-    @staticmethod
-    def get_soup(url: str) -> Optional[BeautifulSoup]:
-        try:
-            resp = requests.get(url, headers=HEADERS, timeout=4)
-            resp.raise_for_status()
-            resp.encoding = 'utf-8'
-            return BeautifulSoup(resp.text, 'html.parser')
-        except Exception as e:
-            logger.debug(f"データ取得スキップ ({url}): {e}")
-            return None
+    _session = None
+
+    @classmethod
+    def get_session(cls) -> requests.Session:
+        if cls._session is None:
+            cls._session = requests.Session()
+            cls._session.headers.update({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+                "Connection": "keep-alive"
+            })
+            adapter = requests.adapters.HTTPAdapter(pool_connections=15, pool_maxsize=30, max_retries=3)
+            cls._session.mount("https://", adapter)
+            cls._session.mount("http://", adapter)
+        return cls._session
+
+    @classmethod
+    def get_soup(cls, url: str, timeout: int = 20, max_retries: int = 3) -> Optional[BeautifulSoup]:
+        session = cls.get_session()
+        for attempt in range(max_retries):
+            try:
+                resp = session.get(url, timeout=timeout)
+                resp.raise_for_status()
+                resp.encoding = resp.apparent_encoding or 'utf-8'
+                return BeautifulSoup(resp.text, 'html.parser')
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.debug(f"データ取得リトライ ({attempt+1}/{max_retries}) [{url}]: {e}")
+                    time.sleep(1.0)
+                else:
+                    logger.warning(f"データ取得失敗 ({url}): {e}")
+        return None
+
 
     @staticmethod
     def parse_float(text: str) -> float:
@@ -615,21 +639,18 @@ def prepare_features_for_model(df_feat: pd.DataFrame, model: lgb.Booster) -> pd.
 
 def fetch_today_venues(date_str: str) -> List[Tuple[int, str]]:
     """当日の開催場一覧を取得"""
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     url = f"https://www.boatrace.jp/owpc/pc/race/index?hd={date_str}"
     venues = []
     try:
-        resp = requests.get(url, headers=headers, timeout=15)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.content, 'html.parser')
-        
-        for a in soup.find_all('a', href=re.compile(r'/owpc/pc/race/raceindex\?jcd=(\d+)')):
-            m = re.search(r'jcd=(\d+)', a['href'])
-            if m:
-                jcd = int(m.group(1))
-                vname = VENUE_MAP.get(jcd, f"場{jcd:02d}")
-                if (jcd, vname) not in venues:
-                    venues.append((jcd, vname))
+        soup = BoatRaceScraper.get_soup(url, timeout=20)
+        if soup:
+            for a in soup.find_all('a', href=re.compile(r'/owpc/pc/race/raceindex\?jcd=(\d+)')):
+                m = re.search(r'jcd=(\d+)', a['href'])
+                if m:
+                    jcd = int(m.group(1))
+                    vname = VENUE_MAP.get(jcd, f"場{jcd:02d}")
+                    if (jcd, vname) not in venues:
+                        venues.append((jcd, vname))
     except Exception as e:
         logger.error(f"開催会場一覧の取得に失敗しました: {e}")
     return sorted(venues, key=lambda x: x[0])
@@ -637,23 +658,20 @@ def fetch_today_venues(date_str: str) -> List[Tuple[int, str]]:
 
 def fetch_venue_race_deadlines(date_str: str, venue_code: int) -> List[Dict[str, Any]]:
     """指定会場の全レース締切時刻を取得"""
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     url = f"https://www.boatrace.jp/owpc/pc/race/raceindex?jcd={venue_code:02d}&hd={date_str}"
     races = []
     try:
-        resp = requests.get(url, headers=headers, timeout=15)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.content, 'html.parser')
-        
-        for tr in soup.select('table tbody tr'):
-            tds = tr.select('th, td')
-            if len(tds) >= 2:
-                r_txt = tds[0].get_text(strip=True)
-                d_txt = tds[1].get_text(strip=True)
-                r_match = re.match(r'(\d+)R', r_txt)
-                d_match = re.match(r'(\d{1,2}:\d{2})', d_txt)
-                if r_match and d_match:
-                    rno = int(r_match.group(1))
+        soup = BoatRaceScraper.get_soup(url, timeout=20)
+        if soup:
+            for tr in soup.select('table tbody tr'):
+                tds = tr.select('th, td')
+                if len(tds) >= 2:
+                    r_txt = tds[0].get_text(strip=True)
+                    d_txt = tds[1].get_text(strip=True)
+                    r_match = re.match(r'(\d+)R', r_txt)
+                    d_match = re.match(r'(\d{1,2}:\d{2})', d_txt)
+                    if r_match and d_match:
+                        rno = int(r_match.group(1))
                     dtime_str = d_match.group(1)
                     if len(dtime_str) == 4:  # "9:30" -> "09:30"
                         dtime_str = "0" + dtime_str
