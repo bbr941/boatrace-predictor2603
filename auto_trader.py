@@ -221,7 +221,51 @@ class BoatRaceScraper:
         return odds_data
 
     @staticmethod
+    def get_race_result(date_str: str, venue_code: int, race_no: int) -> Optional[Dict[str, Any]]:
+        """
+        公式レース結果ページから3連単の確定着順と払戻金（100円あたり）を取得
+        URL: https://www.boatrace.jp/owpc/pc/race/raceresult?rno={race_no}&jcd={jcd}&hd={date_str}
+        """
+        jcd = f"{int(venue_code):02d}"
+        url = f"https://www.boatrace.jp/owpc/pc/race/raceresult?rno={race_no}&jcd={jcd}&hd={date_str}"
+        soup = BoatRaceScraper.get_soup(url)
+        if not soup:
+            return None
+            
+        try:
+            tables = soup.find_all('table')
+            for t in tables:
+                tbody = t.find('tbody')
+                if not tbody:
+                    continue
+                rows = tbody.find_all('tr')
+                for r in rows:
+                    text = r.get_text(separator=' ', strip=True)
+                    if '3連単' in text:
+                        cells = [c.get_text(strip=True) for c in r.find_all(['td', 'th'])]
+                        combo = None
+                        payout = None
+                        for c in cells:
+                            m_combo = re.search(r'([1-6])\s*[-=]\s*([1-6])\s*[-=]\s*([1-6])', c)
+                            if m_combo:
+                                combo = f"{m_combo.group(1)}-{m_combo.group(2)}-{m_combo.group(3)}"
+                            if '¥' in c or '￥' in c or '円' in c:
+                                try:
+                                    payout = int(re.sub(r'[^\d]', '', c))
+                                except Exception:
+                                    pass
+                        if combo and payout is not None:
+                            return {
+                                'combo': combo,
+                                'payout_per_100': payout
+                            }
+        except Exception as e:
+            logger.debug(f"結果パースエラー ({url}): {e}")
+        return None
+
+    @staticmethod
     def get_race_data(date_str: str, venue_code: int, race_no: int) -> Optional[pd.DataFrame]:
+
         """出走表・展示タイム・気象情報を取得"""
         jcd = f"{int(venue_code):02d}"
         url_before = f"https://www.boatrace.jp/owpc/pc/race/beforeinfo?rno={race_no}&jcd={jcd}&hd={date_str}"
@@ -1023,7 +1067,104 @@ def evaluate_race(
     }
 
 
+def settle_race_results(
+    target_date: Optional[str] = None,
+    source: Optional[str] = 'auto'
+) -> List[Dict[str, Any]]:
+    """
+    未確定レースの結果を公式から取得し、推奨買い目と照合して確定損益をSupabaseへ反映
+    """
+    unresolved = db_manager.get_unresolved_predictions(date_str=target_date, source=source)
+    if not unresolved:
+        return []
+        
+    logger.info(f"🔍 [SETTLEMENT] {len(unresolved)} 件の未確定レースの結果確認を開始します...")
+    settled_results = []
+    
+    for r in unresolved:
+        race_id = r['race_id']
+        date_str = r['race_date']
+        venue_code = r['venue_code']
+        venue_name = r['venue_name']
+        race_no = r['race_no']
+        status = r['status']
+        
+        # モックレースの場合は結果スクレイピングをスキップ
+        if "_MOCK" in race_id:
+            continue
+            
+        result = BoatRaceScraper.get_race_result(date_str, venue_code, race_no)
+        if not result:
+            continue
+            
+        combo = result['combo']
+        payout_per_100 = result['payout_per_100']
+        
+        # 推奨買い目を取得
+        bets = db_manager.get_recommended_bets(race_id)
+        
+        if not bets:
+            # 投資対象外レース (Gatekeeper見送り、難水面スキップ、EV見送り等)
+            db_manager.update_race_result(
+                race_id=race_id,
+                actual_result=combo,
+                payout=0,
+                profit=0,
+                hit_status="no_bet"
+            )
+            settled_results.append({
+                'race_id': race_id,
+                'venue_name': venue_name,
+                'race_no': race_no,
+                'actual_result': combo,
+                'hit_status': 'no_bet',
+                'payout': 0,
+                'profit': 0
+            })
+            continue
+            
+        # 投資ありレースの的中判定
+        total_bet = sum(b['bet_amount'] for b in bets)
+        hit_bet = next((b for b in bets if b['combination'] == combo), None)
+        
+        if hit_bet:
+            bet_amt = hit_bet['bet_amount']
+            actual_payout = int((bet_amt / 100.0) * payout_per_100)
+            profit = actual_payout - total_bet
+            hit_status = "hit"
+            logger.info(f"🎉🎉🎉 [🎯的中!] {venue_name} {race_no}R: 結果 {combo} | 投資: {total_bet:,}円 -> 払戻: {actual_payout:,}円 (純利益: {profit:+,}円)")
+        else:
+            actual_payout = 0
+            profit = - total_bet
+            hit_status = "miss"
+            logger.info(f"❌ [不的中] {venue_name} {race_no}R: 結果 {combo} | 投資: {total_bet:,}円 -> 払戻: 0円 (損失: {profit:,}円)")
+            
+        db_manager.update_race_result(
+            race_id=race_id,
+            actual_result=combo,
+            payout=actual_payout,
+            profit=profit,
+            hit_status=hit_status
+        )
+        
+        settled_results.append({
+            'race_id': race_id,
+            'venue_name': venue_name,
+            'race_no': race_no,
+            'actual_result': combo,
+            'hit_status': hit_status,
+            'payout': actual_payout,
+            'profit': profit
+        })
+        
+    if settled_results:
+        logger.info(f"🏁 [SETTLEMENT] {len(settled_results)} 件のレース確定収支をデータベースに反映しました。")
+        
+    return settled_results
+
+
 def evaluate_mock_race(
+
     venue_code: int = 18,
     race_no: int = 10,
     bankroll: float = DEFAULT_BANKROLL,
@@ -1308,13 +1449,17 @@ def run_worker_loop(
     except Exception as e:
         logger.error(f"データベース初期化エラー: {e}")
         
-    # 起動時に即座に当日のスケジュールを登録
+    # 起動時に即座に当日のスケジュールを登録 & 過去レース結果を精算
     register_daily_schedules(
         bankroll=bankroll,
         gatekeeper_th=gatekeeper_th,
         webhook_url=webhook_url,
         dry_run=dry_run
     )
+    try:
+        settle_race_results()
+    except Exception as e:
+        logger.warning(f"起動時レース結果精算例外: {e}")
     
     # 毎朝 08:00 に翌日/当日の全場スケジュールを自動リフレッシュ登録
     schedule.every().day.at("08:00").do(
@@ -1324,6 +1469,9 @@ def run_worker_loop(
         webhook_url=webhook_url,
         dry_run=dry_run
     )
+    
+    # 10分ごとに未確定レースの結果を取得・的中判定・収支更新
+    schedule.every(10).minutes.do(settle_race_results).tag('settlement')
     
     logger.info("⏳ 待機ループ開始... (Ctrl+C で停止)")
     try:
@@ -1342,6 +1490,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="BOATRACE AI Auto Trader Worker")
     parser.add_argument('--test', action='store_true', help="Run single race test evaluation immediately")
     parser.add_argument('--mock', action='store_true', help="Run mock evaluation without web requests (ideal for midnight/offline tests)")
+    parser.add_argument('--settle', action='store_true', help="Run race result settlement & payout calculation for unresolved races")
     parser.add_argument('--date', type=str, default='', help="Date for test in YYYYMMDD (default: today)")
     parser.add_argument('--venue', type=int, default=18, help="Venue code for test (1-24, default: 18/Tokuyama)")
     parser.add_argument('--race', type=int, default=10, help="Race number for test (1-12, default: 10)")
@@ -1363,7 +1512,13 @@ if __name__ == "__main__":
     if args.dry_run:
         webhook = ''
         
-    if args.mock:
+    if args.settle:
+        # 結果精算・確定収支計算モード
+        target_d = args.date if args.date else None
+        logger.info(f"🏁 未確定レースの結果取得・確定収支計算を実行します (Date: {target_d or 'All'})...")
+        settled = settle_race_results(target_date=target_d)
+        print(f"✅ 精算完了: {len(settled)} 件のレース結果を更新しました。")
+    elif args.mock:
         # モック検証モード
         evaluate_mock_race(
             venue_code=args.venue,
@@ -1419,3 +1574,4 @@ if __name__ == "__main__":
             webhook_url=webhook,
             dry_run=args.dry_run
         )
+

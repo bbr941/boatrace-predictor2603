@@ -183,15 +183,26 @@ def init_database() -> bool:
                 cluster_name VARCHAR(50),
                 status VARCHAR(50) NOT NULL,
                 source VARCHAR(20) DEFAULT 'auto',
+                actual_result VARCHAR(10),
+                payout INT DEFAULT 0,
+                profit INT DEFAULT 0,
+                is_resolved BOOLEAN DEFAULT FALSE,
+                hit_status VARCHAR(20),
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             );
             """)
             
-            # source カラムのマイグレーション（既存テーブルへの追加）
-            try:
-                cur.execute("ALTER TABLE race_predictions ADD COLUMN IF NOT EXISTS source VARCHAR(20) DEFAULT 'auto';")
-            except Exception:
-                pass
+            # カラムのマイグレーション（既存テーブルへの追加）
+            for col_ddl in [
+                "ALTER TABLE race_predictions ADD COLUMN IF NOT EXISTS source VARCHAR(20) DEFAULT 'auto';",
+                "ALTER TABLE race_predictions ADD COLUMN IF NOT EXISTS actual_result VARCHAR(10);",
+                "ALTER TABLE race_predictions ADD COLUMN IF NOT EXISTS payout INT DEFAULT 0;",
+                "ALTER TABLE race_predictions ADD COLUMN IF NOT EXISTS profit INT DEFAULT 0;",
+                "ALTER TABLE race_predictions ADD COLUMN IF NOT EXISTS is_resolved BOOLEAN DEFAULT FALSE;",
+                "ALTER TABLE race_predictions ADD COLUMN IF NOT EXISTS hit_status VARCHAR(20);"
+            ]:
+                try: cur.execute(col_ddl)
+                except Exception: pass
             
             # 2. 最適化選出買い目テーブル
             cur.execute("""
@@ -238,6 +249,7 @@ def init_database() -> bool:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_race_pred_date ON race_predictions(race_date);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_race_pred_status ON race_predictions(status);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_race_pred_source ON race_predictions(source);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_race_pred_resolved ON race_predictions(is_resolved);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_rec_bets_race ON recommended_bets(race_id);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_odds_data_race ON odds_data(race_id);")
             
@@ -263,15 +275,26 @@ def init_database() -> bool:
                 cluster_name TEXT,
                 status TEXT NOT NULL,
                 source TEXT DEFAULT 'auto',
+                actual_result TEXT,
+                payout INTEGER DEFAULT 0,
+                profit INTEGER DEFAULT 0,
+                is_resolved INTEGER DEFAULT 0,
+                hit_status TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """)
             
-            # SQLite source カラムマイグレーション
-            try:
-                cur.execute("ALTER TABLE race_predictions ADD COLUMN source TEXT DEFAULT 'auto';")
-            except Exception:
-                pass
+            # SQLite カラムマイグレーション
+            for col_ddl in [
+                "ALTER TABLE race_predictions ADD COLUMN source TEXT DEFAULT 'auto';",
+                "ALTER TABLE race_predictions ADD COLUMN actual_result TEXT;",
+                "ALTER TABLE race_predictions ADD COLUMN payout INTEGER DEFAULT 0;",
+                "ALTER TABLE race_predictions ADD COLUMN profit INTEGER DEFAULT 0;",
+                "ALTER TABLE race_predictions ADD COLUMN is_resolved INTEGER DEFAULT 0;",
+                "ALTER TABLE race_predictions ADD COLUMN hit_status TEXT;"
+            ]:
+                try: cur.execute(col_ddl)
+                except Exception: pass
             
             cur.execute("""
             CREATE TABLE IF NOT EXISTS recommended_bets (
@@ -313,8 +336,10 @@ def init_database() -> bool:
             
             cur.execute("CREATE INDEX IF NOT EXISTS idx_race_pred_date ON race_predictions(race_date);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_race_pred_source ON race_predictions(source);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_race_pred_resolved ON race_predictions(is_resolved);")
             
             logger.info("✅ [SQLite] 全4テーブルのマイグレーションが完了しました！")
+
             
     return True
 
@@ -551,16 +576,91 @@ def get_recommended_bets(race_id: str) -> List[Dict[str, Any]]:
         return [dict(zip(cols, row)) for row in rows]
 
 
+def update_race_result(
+    race_id: str,
+    actual_result: str,
+    payout: int,
+    profit: int,
+    hit_status: str
+) -> bool:
+    """
+    レース確定結果と払戻金・確定損益を更新 (is_resolved = TRUE)
+    """
+    with get_db_connection() as db:
+        cur = db.cursor()
+        ph = "%s" if db.is_postgres else "?"
+        resolved_val = "TRUE" if db.is_postgres else "1"
+        
+        query = f"""
+        UPDATE race_predictions
+        SET actual_result = {ph},
+            payout = {ph},
+            profit = {ph},
+            hit_status = {ph},
+            is_resolved = {resolved_val}
+        WHERE race_id = {ph};
+        """
+        cur.execute(query, (actual_result, int(payout), int(profit), hit_status, race_id))
+        logger.info(f"🏁 [{race_id}] 結果確定更新: {actual_result} | Status: {hit_status} | Payout: {payout:,}円 | Profit: {profit:+,}円")
+        return True
+
+
+def get_unresolved_predictions(
+    date_str: Optional[str] = None,
+    source: Optional[str] = 'auto'
+) -> List[Dict[str, Any]]:
+    """
+    結果未確定の推論レコードを取得
+    """
+    with get_db_connection() as db:
+        cur = db.cursor()
+        ph = "%s" if db.is_postgres else "?"
+        
+        conditions = []
+        params = []
+        
+        if db.is_postgres:
+            conditions.append("(is_resolved IS NULL OR is_resolved = FALSE)")
+        else:
+            conditions.append("(is_resolved IS NULL OR is_resolved = 0)")
+            
+        if date_str:
+            conditions.append(f"race_date = {ph}")
+            params.append(date_str)
+        if source:
+            conditions.append(f"source = {ph}")
+            params.append(source)
+            
+        where_sql = f"WHERE {' AND '.join(conditions)}"
+        query = f"""
+        SELECT race_id, race_date, venue_code, venue_name, race_no, deadline_time, status, source
+        FROM race_predictions
+        {where_sql}
+        ORDER BY race_date ASC, deadline_time ASC;
+        """
+        cur.execute(query, params)
+        cols = [desc[0] for desc in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
 def get_dashboard_stats(date_str: Optional[str] = None, source: Optional[str] = 'auto') -> Dict[str, Any]:
     """
-    ダッシュボード用の KPI 統計集計 (デフォルトで自動運用 source='auto' のみ集計)
+    ダッシュボード用の KPI 統計集計 (確定損益・実回収率・的中率を含む)
     """
     default_stats = {
         'total_evaluated': 0,
         'gatekeeper_passed': 0,
         'gatekeeper_rate': 0.0,
         'investment_go': 0,
-        'total_recommended_bet': 0
+        'total_recommended_bet': 0,
+        'resolved_races': 0,
+        'hit_count': 0,
+        'miss_count': 0,
+        'hit_rate': 0.0,
+        'total_payout': 0,
+        'net_profit': 0,
+        'resolved_bet': 0,
+        'recovery_rate': 0.0
     }
     try:
         with get_db_connection() as db:
@@ -588,7 +688,8 @@ def get_dashboard_stats(date_str: Optional[str] = None, source: Optional[str] = 
             gk_passed = cur.fetchone()[0] or 0
             
             # 3. 投資GOサイン数 (ガチ投資・エンタメ・的中特化を含む)
-            cur.execute(f"SELECT COUNT(*) FROM race_predictions {where_clause + (' AND ' if where_clause else 'WHERE ')} status IN ('investment_go', 'mock_investment_go', 'entertainment_go', 'hit_focused_go');", params)
+            go_status_cond = "status IN ('investment_go', 'mock_investment_go', 'entertainment_go', 'hit_focused_go')"
+            cur.execute(f"SELECT COUNT(*) FROM race_predictions {where_clause + (' AND ' if where_clause else 'WHERE ')} {go_status_cond};", params)
             go_count = cur.fetchone()[0] or 0
             
             # 4. 推奨投資総額
@@ -603,12 +704,53 @@ def get_dashboard_stats(date_str: Optional[str] = None, source: Optional[str] = 
             cur.execute(f"SELECT COALESCE(SUM(b.bet_amount), 0) FROM recommended_bets b {join_clause};", params)
             total_bet = cur.fetchone()[0] or 0
             
+            # 5. 確定損益・的中数集計 (投資GOサイン対象レースのみ)
+            resolved_cond = "is_resolved = TRUE" if db.is_postgres else "is_resolved = 1"
+            pnl_where = f"{where_clause + (' AND ' if where_clause else 'WHERE ')} {resolved_cond} AND {go_status_cond}"
+            
+            cur.execute(f"""
+                SELECT 
+                    COUNT(*),
+                    COALESCE(SUM(CASE WHEN hit_status = 'hit' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN hit_status = 'miss' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(payout), 0),
+                    COALESCE(SUM(profit), 0)
+                FROM race_predictions
+                {pnl_where};
+            """, params)
+            pnl_row = cur.fetchone()
+            resolved_races = pnl_row[0] or 0
+            hit_count = pnl_row[1] or 0
+            miss_count = pnl_row[2] or 0
+            total_payout = int(pnl_row[3] or 0)
+            net_profit = int(pnl_row[4] or 0)
+            
+            # 確定レースの投資総額
+            cur.execute(f"""
+                SELECT COALESCE(SUM(b.bet_amount), 0)
+                FROM recommended_bets b
+                JOIN race_predictions p ON b.race_id = p.race_id
+                {join_where + (' AND ' if join_where else 'WHERE ')} {resolved_cond.replace('is_resolved', 'p.is_resolved')} AND {go_status_cond.replace('status', 'p.status')};
+            """, params)
+            resolved_bet = cur.fetchone()[0] or 0
+            
+            hit_rate = (hit_count / (hit_count + miss_count)) if (hit_count + miss_count) > 0 else 0.0
+            recovery_rate = (total_payout / resolved_bet * 100.0) if resolved_bet > 0 else 0.0
+            
             return {
                 'total_evaluated': total_eval,
                 'gatekeeper_passed': gk_passed,
                 'gatekeeper_rate': (gk_passed / total_eval) if total_eval > 0 else 0.0,
                 'investment_go': go_count,
-                'total_recommended_bet': int(total_bet)
+                'total_recommended_bet': int(total_bet),
+                'resolved_races': resolved_races,
+                'hit_count': hit_count,
+                'miss_count': miss_count,
+                'hit_rate': hit_rate,
+                'total_payout': total_payout,
+                'net_profit': net_profit,
+                'resolved_bet': int(resolved_bet),
+                'recovery_rate': recovery_rate
             }
     except Exception as e:
         logger.warning(f"get_dashboard_stats例外: {e} -> テーブル自動初期化を試行します...")
@@ -627,7 +769,7 @@ def get_all_predictions_with_bets(
     limit: int = 100
 ) -> List[Dict[str, Any]]:
     """
-    推論結果と対応する推奨買い目を結合して取得 (デフォルトで自動運用 source='auto' のみ抽出)
+    推論結果と対応する推奨買い目を結合して取得 (確定結果フィールドを含む)
     """
     try:
         with get_db_connection() as db:
@@ -648,6 +790,10 @@ def get_all_predictions_with_bets(
                     conditions.append("p.status IN ('investment_go', 'mock_investment_go', 'entertainment_go', 'hit_focused_go')")
                 elif status_filter == 'gatekeeper_passed':
                     conditions.append("p.gatekeeper_passed = TRUE" if db.is_postgres else "p.gatekeeper_passed = 1")
+                elif status_filter == 'hit':
+                    conditions.append("p.hit_status = 'hit'")
+                elif status_filter == 'miss':
+                    conditions.append("p.hit_status = 'miss'")
                 else:
                     conditions.append(f"p.status = {ph}")
                     params.append(status_filter)
@@ -661,7 +807,9 @@ def get_all_predictions_with_bets(
             query = f"""
             SELECT p.race_id, p.race_date, p.venue_code, p.venue_name, p.race_no,
                    p.deadline_time, p.top_boat, p.max_p1, p.prob_gap, p.gatekeeper_passed,
-                   p.cluster_id, p.cluster_name, p.status, p.source, p.created_at
+                   p.cluster_id, p.cluster_name, p.status, p.source,
+                   p.actual_result, p.payout, p.profit, p.is_resolved, p.hit_status,
+                   p.created_at
             FROM race_predictions p
             {where_sql}
             ORDER BY p.created_at DESC
@@ -704,6 +852,7 @@ def get_all_predictions_with_bets(
         except Exception:
             pass
         return []
+
 
 
 def get_notification_logs(limit: int = 50) -> List[Dict[str, Any]]:

@@ -253,7 +253,51 @@ class BoatRaceScraper:
         return odds_data
 
     @staticmethod
+    def get_race_result(date_str: str, venue_code: int, race_no: int) -> Optional[Dict[str, Any]]:
+        """
+        公式レース結果ページから3連単の確定着順と払戻金（100円あたり）を取得
+        URL: https://www.boatrace.jp/owpc/pc/race/raceresult?rno={race_no}&jcd={jcd}&hd={date_str}
+        """
+        jcd = f"{int(venue_code):02d}"
+        url = f"https://www.boatrace.jp/owpc/pc/race/raceresult?rno={race_no}&jcd={jcd}&hd={date_str}"
+        soup = BoatRaceScraper.get_soup(url)
+        if not soup:
+            return None
+            
+        try:
+            tables = soup.find_all('table')
+            for t in tables:
+                tbody = t.find('tbody')
+                if not tbody:
+                    continue
+                rows = tbody.find_all('tr')
+                for r in rows:
+                    text = r.get_text(separator=' ', strip=True)
+                    if '3連単' in text:
+                        cells = [c.get_text(strip=True) for c in r.find_all(['td', 'th'])]
+                        combo = None
+                        payout = None
+                        for c in cells:
+                            m_combo = re.search(r'([1-6])\s*[-=]\s*([1-6])\s*[-=]\s*([1-6])', c)
+                            if m_combo:
+                                combo = f"{m_combo.group(1)}-{m_combo.group(2)}-{m_combo.group(3)}"
+                            if '¥' in c or '￥' in c or '円' in c:
+                                try:
+                                    payout = int(re.sub(r'[^\d]', '', c))
+                                except Exception:
+                                    pass
+                        if combo and payout is not None:
+                            return {
+                                'combo': combo,
+                                'payout_per_100': payout
+                            }
+        except Exception as e:
+            pass
+        return None
+
+    @staticmethod
     def get_race_data(date_str, venue_code, race_no):
+
         jcd = f"{int(venue_code):02d}"
         url_before = f"https://www.boatrace.jp/owpc/pc/race/beforeinfo?rno={race_no}&jcd={jcd}&hd={date_str}"
         url_list = f"https://www.boatrace.jp/owpc/pc/race/racelist?rno={race_no}&jcd={jcd}&hd={date_str}"
@@ -773,10 +817,10 @@ if st.sidebar.button("🧹 キャッシュクリア (Clear Cache)", use_containe
 
 if app_mode == "📊 自動運用ダッシュボード (Auto Dashboard)":
     st.title("📊 自動運用モニタリングダッシュボード")
-    st.caption("`auto_trader.py` による自動推論・Gatekeeper判定・投資GOサインのリアルタイム集計")
+    st.caption("`auto_trader.py` による自動推論・Gatekeeper判定・推奨買い目・確定収支のリアルタイム集計")
 
     # 上部コントロールバー
-    col_c1, col_c2, col_c3 = st.columns([2, 1, 1])
+    col_c1, col_c2, col_c3, col_c4 = st.columns([2, 1, 1.2, 1])
     with col_c1:
         today_date_str = datetime.date.today().strftime('%Y%m%d')
         date_filter_mode = st.selectbox(
@@ -789,8 +833,19 @@ if app_mode == "📊 自動運用ダッシュボード (Auto Dashboard)":
     with col_c2:
         if st.button("🔄 最新データ再取得", use_container_width=True):
             st.rerun()
-            
+
     with col_c3:
+        if st.button("🏁 結果即時更新", help="公式から最新の確定着順・払戻金を取得して的中判定と収支を更新します", use_container_width=True):
+            import auto_trader
+            with st.spinner("公式レース結果を取得・精算中..."):
+                settled = auto_trader.settle_race_results(selected_date)
+            if settled:
+                st.success(f"🎉 {len(settled)} 件のレース結果を確定・更新しました！")
+            else:
+                st.info("未確定レースはありませんでした（または結果未発表）。")
+            st.rerun()
+            
+    with col_c4:
         if st.button("🧪 モック推論生成", help="テスト用の模擬投資GOレースを生成してDBへ保存します", use_container_width=True):
             import auto_trader
             with st.spinner("模擬レース推論を実行中..."):
@@ -801,34 +856,40 @@ if app_mode == "📊 自動運用ダッシュボード (Auto Dashboard)":
     # KPI メトリクス
     stats = db_manager.get_dashboard_stats(selected_date)
     
-    st.markdown("### 📈 運用パフォーマンス サマリー")
+    st.markdown("### 📈 確定収支 & 運用パフォーマンス サマリー")
     m1, m2, m3, m4 = st.columns(4)
     with m1:
+        profit_color = "#00E676" if stats['net_profit'] > 0 else ("#FF5252" if stats['net_profit'] < 0 else "#FFFFFF")
         st.markdown(f"""
         <div class="metric-card">
-            <div style="font-size: 0.85em; color: #888;">🏟️ 分析完了レース数</div>
-            <div style="font-size: 1.8em; font-weight: 700;">{stats['total_evaluated']:,} <span style="font-size:0.5em; font-weight:400;">R</span></div>
+            <div style="font-size: 0.85em; color: #888;">💰 確定純損益 (実払戻 - 総投資)</div>
+            <div style="font-size: 1.8em; font-weight: 700; color: {profit_color};">{stats['net_profit']:+,} <span style="font-size:0.5em; font-weight:400;">円</span></div>
+            <div style="font-size: 0.8em; color: #aaa; margin-top: 4px;">総投資: {stats['resolved_bet']:,}円 / 払戻: {stats['total_payout']:,}円</div>
         </div>
         """, unsafe_allow_html=True)
     with m2:
+        rec_color = "#00E676" if stats['recovery_rate'] >= 100.0 else ("#FFD600" if stats['recovery_rate'] > 0 else "#FFFFFF")
         st.markdown(f"""
         <div class="metric-card">
-            <div style="font-size: 0.85em; color: #888;">🛡️ Gatekeeper 通過率 (P1 >= 74.38%)</div>
-            <div style="font-size: 1.8em; font-weight: 700; color: #00E5FF;">{stats['gatekeeper_passed']:,} <span style="font-size:0.5em; font-weight:400;">R ({stats['gatekeeper_rate']:.1%})</span></div>
+            <div style="font-size: 0.85em; color: #888;">🎯 確定回収率 (ROI)</div>
+            <div style="font-size: 1.8em; font-weight: 700; color: {rec_color};">{stats['recovery_rate']:.1f} <span style="font-size:0.5em; font-weight:400;">%</span></div>
+            <div style="font-size: 0.8em; color: #aaa; margin-top: 4px;">確定勝負レース数: {stats['resolved_races']:,} R</div>
         </div>
         """, unsafe_allow_html=True)
     with m3:
         st.markdown(f"""
         <div class="metric-card">
-            <div style="font-size: 0.85em; color: #888;">🚀 投資GOサイン 点灯数</div>
-            <div style="font-size: 1.8em; font-weight: 700; color: #00E676;">{stats['investment_go']:,} <span style="font-size:0.5em; font-weight:400;">R</span></div>
+            <div style="font-size: 0.85em; color: #888;">🏆 的中率 (Hit Rate)</div>
+            <div style="font-size: 1.8em; font-weight: 700; color: #00E5FF;">{stats['hit_rate']:.1%}</div>
+            <div style="font-size: 0.8em; color: #aaa; margin-top: 4px;">的中: {stats['hit_count']}勝 / 確定: {stats['hit_count'] + stats['miss_count']}R</div>
         </div>
         """, unsafe_allow_html=True)
     with m4:
         st.markdown(f"""
         <div class="metric-card">
-            <div style="font-size: 0.85em; color: #888;">💰 推奨投資総額 (SLSQP最適配分)</div>
-            <div style="font-size: 1.8em; font-weight: 700; color: #FFD600;">{stats['total_recommended_bet']:,} <span style="font-size:0.5em; font-weight:400;">円</span></div>
+            <div style="font-size: 0.85em; color: #888;">🚀 投資GOサイン点灯数</div>
+            <div style="font-size: 1.8em; font-weight: 700; color: #FFD600;">{stats['investment_go']:,} <span style="font-size:0.5em; font-weight:400;">R</span></div>
+            <div style="font-size: 0.8em; color: #aaa; margin-top: 4px;">分析: {stats['total_evaluated']}R (GK通過: {stats['gatekeeper_rate']:.1%})</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -839,10 +900,12 @@ if app_mode == "📊 自動運用ダッシュボード (Auto Dashboard)":
     with f1:
         status_filter = st.selectbox(
             "🔍 ステータス絞り込み",
-            ["all", "investment_go", "gatekeeper_passed", "gatekeeper_skipped", "skipped_cluster1", "no_value_bets"],
+            ["all", "investment_go", "hit", "miss", "gatekeeper_passed", "gatekeeper_skipped", "skipped_cluster1", "no_value_bets"],
             format_func=lambda x: {
                 "all": "全ステータス (All)",
                 "investment_go": "🚀 投資GOサインのみ (Investment GO)",
+                "hit": "🎯 的中レースのみ (Hits)",
+                "miss": "❌ 不的中レースのみ (Misses)",
                 "gatekeeper_passed": "🛡️ Gatekeeper通過のみ (Passed)",
                 "gatekeeper_skipped": "☕ Gatekeeper未達見送り (Skipped)",
                 "skipped_cluster1": "🛑 難水面システム除外 (Cluster 1)",
@@ -864,7 +927,7 @@ if app_mode == "📊 自動運用ダッシュボード (Auto Dashboard)":
         limit=20
     )
 
-    st.markdown("### 🚀 【投資GOサイン】本日の勝負レース")
+    st.markdown("### 🚀 【投資GOサイン】勝負レース & 確定結果")
     if go_races:
         for r in go_races:
             rid = r['race_id']
@@ -879,6 +942,22 @@ if app_mode == "📊 自動運用ダッシュボード (Auto Dashboard)":
             bets = r.get('bets', [])
             tbet = r.get('total_bet', 0)
             max_ret = r.get('max_return', 0)
+            is_res = r.get('is_resolved', False)
+            hstatus = r.get('hit_status', '')
+            actual_res = r.get('actual_result', '')
+            payout_val = r.get('payout', 0)
+            profit_val = r.get('profit', 0)
+            
+            # 的中ステータスバッジ
+            if is_res:
+                if hstatus == 'hit':
+                    res_badge = f'<span style="background:#00E676;color:#000;padding:4px 10px;border-radius:4px;font-weight:bold;">🎯 的中！ 払戻: {payout_val:,}円 (利益: {profit_val:+,}円)</span>'
+                elif hstatus == 'miss':
+                    res_badge = f'<span style="background:#616161;color:#fff;padding:4px 10px;border-radius:4px;font-weight:bold;">❌ 不的中 (確定着順: {actual_res}) 損失: {profit_val:,}円</span>'
+                else:
+                    res_badge = f'<span style="background:#333;color:#aaa;padding:4px 10px;border-radius:4px;">確定: {actual_res}</span>'
+            else:
+                res_badge = '<span style="background:#FF9800;color:#000;padding:4px 10px;border-radius:4px;font-weight:bold;">⏳ 結果待ち (発走後判定)</span>'
             
             st.markdown(f"""
             <div class="investment-card">
@@ -887,7 +966,7 @@ if app_mode == "📊 自動運用ダッシュボード (Auto Dashboard)":
                         🚀 {vname} {rno}R <span style="font-size:0.8em; color:#aaa; font-weight:normal;">(締切: {dtime})</span>
                     </div>
                     <div>
-                        <span class="badge-win">投資GOサイン点灯</span>
+                        {res_badge}
                     </div>
                 </div>
                 <div style="font-size: 0.9em; color: #ccc; margin-bottom: 12px;">
@@ -914,7 +993,7 @@ if app_mode == "📊 自動運用ダッシュボード (Auto Dashboard)":
     st.markdown("---")
 
     # 全推論履歴テーブル
-    st.markdown("### 📋 全レース推論 & 判定履歴一覧")
+    st.markdown("### 📋 全レース推論 & 的中・確定収支履歴一覧")
     all_races = db_manager.get_all_predictions_with_bets(
         date_str=selected_date,
         status_filter=status_filter,
@@ -939,20 +1018,40 @@ if app_mode == "📊 自動運用ダッシュボード (Auto Dashboard)":
                 'no_value_bets': '🔍 EV未達'
             }.get(r['status'], r['status'])
             
+            # 的中ステータス表示
+            is_res = r.get('is_resolved', False)
+            hstatus = r.get('hit_status', '')
+            tbet = r.get('total_bet', 0)
+            
+            if is_res:
+                if hstatus == 'hit':
+                    hit_label = "🎯 的中"
+                elif hstatus == 'miss':
+                    hit_label = "❌ 不的中"
+                else:
+                    hit_label = "☕ 見送り"
+            else:
+                hit_label = "⏳ 結果待ち" if tbet > 0 else "☕ 見送り"
+                
+            actual_res = r.get('actual_result') or "-"
+            payout_str = f"{r.get('payout', 0):,} 円" if is_res and hstatus == 'hit' else ("0 円" if is_res and hstatus == 'miss' else "-")
+            profit_str = f"{r.get('profit', 0):+,} 円" if is_res and tbet > 0 else "-"
+            
             history_rows.append({
                 'レースID': r['race_id'],
                 '日付': r['race_date'],
                 '会場': r['venue_name'],
                 'R': f"{r['race_no']}R",
                 '締切': r.get('deadline_time', '-'),
+                '判定': status_badge,
+                '的中結果': hit_label,
+                '確定着順': actual_res,
+                '投資総額': f"{tbet:,} 円" if tbet > 0 else "-",
+                '払戻金額': payout_str,
+                '確定損益': profit_str,
                 '本命艇': top_b_val,
                 'Gatekeeper P1': p1_val,
                 '2位差': gap_val,
-                '通過': "✅ 通過" if r['gatekeeper_passed'] else "❌ 未達",
-                'クラスタ': r.get('cluster_name', '-'),
-                '判定ステータス': status_badge,
-                '買い目数': len(r.get('bets', [])),
-                '投資総額': f"{r.get('total_bet', 0):,} 円" if r.get('total_bet', 0) > 0 else "-",
                 '評価日時': str(r['created_at'])[:19]
             })
             
@@ -972,6 +1071,7 @@ if app_mode == "📊 自動運用ダッシュボード (Auto Dashboard)":
                 st.markdown("---")
         else:
             st.write("配信ログはまだありません。")
+
 
 
 # =====================================================================

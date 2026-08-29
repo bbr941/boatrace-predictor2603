@@ -1,0 +1,23 @@
+# タスクリスト: ダッシュボードの的中判定・確定収支の自動化実装
+
+- [x] **1. db_manager.py のスキーマ拡張 & 確定収支対応** <!-- id: 0 -->
+  - [x] `race_predictions` に `actual_result`, `payout`, `profit`, `is_resolved`, `hit_status` を追加するマイグレーション <!-- id: 1 -->
+  - [x] `update_race_result` 関数の実装 <!-- id: 2 -->
+  - [x] `get_unresolved_predictions` 関数の実装 <!-- id: 3 -->
+  - [x] `get_dashboard_stats` の拡張（確定損益・回収率・的中率の集計） <!-- id: 4 -->
+  - [x] `get_all_predictions_with_bets` の拡張（確定結果フィールドの取得） <!-- id: 5 -->
+- [x] **2. auto_trader.py のスクレイピング & 的中判定ロジック実装** <!-- id: 6 -->
+  - [x] `BoatRaceScraper.get_race_result` の実装 <!-- id: 7 -->
+  - [x] `settle_race_results` の実装（推奨買い目照合、払戻金・純損益計算、DB更新） <!-- id: 8 -->
+  - [x] スケジューラー / メインループへの結果確定巡回ジョブの組み込み <!-- id: 9 -->
+- [x] **3. app_boatrace.py & app_v3.py のダッシュボード UI 改修** <!-- id: 10 -->
+  - [x] KPI メトリクス表示の刷新（確定損益・実回収率・的中率・投資GO数） <!-- id: 11 -->
+  - [x] 「🏁 レース結果を即時更新 (Update Results)」ボタンの追加 <!-- id: 12 -->
+  - [x] 推論一覧テーブルへの的中判定アイコン・確定着順・払戻金・損益列の追加 <!-- id: 13 -->
+  - [x] `boatrace-v3-predictor/app_v3.py` の同期更新 <!-- id: 14 -->
+- [x] **4. 動作検証 & テスト** <!-- id: 15 -->
+  - [x] 実レース結果スクレイピングのテスト <!-- id: 16 -->
+  - [x] 的中・不適中シナリオでの損益計算・DB更新・KPI集計の単体テスト <!-- id: 17 -->
+- [x] **5. ドキュメント作成 & Git コミット** <!-- id: 18 -->
+  - [x] `walkthrough.md` の作成 <!-- id: 19 -->
+  - [x] Git コミット & プッシュ <!-- id: 20 -->
