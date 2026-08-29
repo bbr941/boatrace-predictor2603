@@ -834,8 +834,10 @@ def evaluate_race(
                 race_id=race_id, race_date=date_str, venue_code=venue_code,
                 venue_name=venue_name, race_no=race_no, deadline_time=deadline_str,
                 top_boat=None, max_p1=None, prob_gap=None, gatekeeper_passed=False,
-                cluster_id=1, cluster_name="難水面・波乱場", status="skipped_cluster1"
+                cluster_id=1, cluster_name="難水面・波乱場", status="skipped_cluster1",
+                source="auto"
             )
+
         except Exception: pass
         return {'status': 'skipped_cluster1'}
         
@@ -914,7 +916,8 @@ def evaluate_race(
                 race_id=race_id, race_date=date_str, venue_code=venue_code,
                 venue_name=venue_name, race_no=race_no, deadline_time=deadline_str,
                 top_boat=top_boat, max_p1=max_p1, prob_gap=prob_gap, gatekeeper_passed=False,
-                cluster_id=cluster_id, cluster_name=cluster_name, status="gatekeeper_skipped"
+                cluster_id=cluster_id, cluster_name=cluster_name, status="gatekeeper_skipped",
+                source="auto"
             )
         except Exception: pass
         return {
@@ -965,7 +968,8 @@ def evaluate_race(
                 race_id=race_id, race_date=date_str, venue_code=venue_code,
                 venue_name=venue_name, race_no=race_no, deadline_time=deadline_str,
                 top_boat=top_boat, max_p1=max_p1, prob_gap=prob_gap, gatekeeper_passed=True,
-                cluster_id=cluster_id, cluster_name=cluster_name, status="no_value_bets"
+                cluster_id=cluster_id, cluster_name=cluster_name, status="no_value_bets",
+                source="auto"
             )
         except Exception: pass
         return {
@@ -983,9 +987,11 @@ def evaluate_race(
             race_id=race_id, race_date=date_str, venue_code=venue_code,
             venue_name=venue_name, race_no=race_no, deadline_time=deadline_str,
             top_boat=top_boat, max_p1=max_p1, prob_gap=prob_gap, gatekeeper_passed=True,
-            cluster_id=cluster_id, cluster_name=cluster_name, status="investment_go"
+            cluster_id=cluster_id, cluster_name=cluster_name, status="investment_go",
+            source="auto"
         )
         db_manager.save_recommended_bets(race_id, bets, benter_probs_dict, all_odds)
+
     except Exception as e:
         logger.error(f"Supabaseへの推論結果保存エラー: {e}")
     
@@ -1162,8 +1168,10 @@ def evaluate_mock_race(
             race_id=race_id, race_date=date_str, venue_code=venue_code,
             venue_name=v_name, race_no=race_no, deadline_time="15:25 (MOCK)",
             top_boat=top_boat, max_p1=max_p1, prob_gap=prob_gap, gatekeeper_passed=True,
-            cluster_id=cluster_id, cluster_name=cluster_name, status="mock_investment_go"
+            cluster_id=cluster_id, cluster_name=cluster_name, status="mock_investment_go",
+            source="auto"
         )
+
         if bets:
             db_manager.save_recommended_bets(race_id, bets, benter_probs_dict, all_odds)
     except Exception as e:

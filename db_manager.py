@@ -182,9 +182,16 @@ def init_database() -> bool:
                 cluster_id INT,
                 cluster_name VARCHAR(50),
                 status VARCHAR(50) NOT NULL,
+                source VARCHAR(20) DEFAULT 'auto',
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             );
             """)
+            
+            # source カラムのマイグレーション（既存テーブルへの追加）
+            try:
+                cur.execute("ALTER TABLE race_predictions ADD COLUMN IF NOT EXISTS source VARCHAR(20) DEFAULT 'auto';")
+            except Exception:
+                pass
             
             # 2. 最適化選出買い目テーブル
             cur.execute("""
@@ -230,6 +237,7 @@ def init_database() -> bool:
             # インデックスの作成
             cur.execute("CREATE INDEX IF NOT EXISTS idx_race_pred_date ON race_predictions(race_date);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_race_pred_status ON race_predictions(status);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_race_pred_source ON race_predictions(source);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_rec_bets_race ON recommended_bets(race_id);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_odds_data_race ON odds_data(race_id);")
             
@@ -254,9 +262,16 @@ def init_database() -> bool:
                 cluster_id INTEGER,
                 cluster_name TEXT,
                 status TEXT NOT NULL,
+                source TEXT DEFAULT 'auto',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """)
+            
+            # SQLite source カラムマイグレーション
+            try:
+                cur.execute("ALTER TABLE race_predictions ADD COLUMN source TEXT DEFAULT 'auto';")
+            except Exception:
+                pass
             
             cur.execute("""
             CREATE TABLE IF NOT EXISTS recommended_bets (
@@ -296,6 +311,9 @@ def init_database() -> bool:
             );
             """)
             
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_race_pred_date ON race_predictions(race_date);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_race_pred_source ON race_predictions(source);")
+            
             logger.info("✅ [SQLite] 全4テーブルのマイグレーションが完了しました！")
             
     return True
@@ -318,7 +336,8 @@ def save_race_prediction(
     gatekeeper_passed: bool,
     cluster_id: Optional[int],
     cluster_name: Optional[str],
-    status: str
+    status: str,
+    source: str = 'auto'
 ) -> bool:
     """
     推論結果・Gatekeeper 判定結果を保存 (UPSERT)
@@ -332,8 +351,8 @@ def save_race_prediction(
             INSERT INTO race_predictions (
                 race_id, race_date, venue_code, venue_name, race_no,
                 deadline_time, top_boat, max_p1, prob_gap, gatekeeper_passed,
-                cluster_id, cluster_name, status
-            ) VALUES ({', '.join([ph]*13)})
+                cluster_id, cluster_name, status, source
+            ) VALUES ({', '.join([ph]*14)})
             ON CONFLICT (race_id) DO UPDATE SET
                 top_boat = EXCLUDED.top_boat,
                 max_p1 = EXCLUDED.max_p1,
@@ -342,6 +361,7 @@ def save_race_prediction(
                 cluster_id = EXCLUDED.cluster_id,
                 cluster_name = EXCLUDED.cluster_name,
                 status = EXCLUDED.status,
+                source = EXCLUDED.source,
                 created_at = CURRENT_TIMESTAMP;
             """
         else:
@@ -349,8 +369,8 @@ def save_race_prediction(
             INSERT INTO race_predictions (
                 race_id, race_date, venue_code, venue_name, race_no,
                 deadline_time, top_boat, max_p1, prob_gap, gatekeeper_passed,
-                cluster_id, cluster_name, status
-            ) VALUES ({', '.join([ph]*13)})
+                cluster_id, cluster_name, status, source
+            ) VALUES ({', '.join([ph]*14)})
             ON CONFLICT(race_id) DO UPDATE SET
                 top_boat = excluded.top_boat,
                 max_p1 = excluded.max_p1,
@@ -359,17 +379,19 @@ def save_race_prediction(
                 cluster_id = excluded.cluster_id,
                 cluster_name = excluded.cluster_name,
                 status = excluded.status,
+                source = excluded.source,
                 created_at = CURRENT_TIMESTAMP;
             """
             
         params = (
             race_id, race_date, venue_code, venue_name, race_no,
             deadline_time, top_boat, max_p1, prob_gap, gatekeeper_passed,
-            cluster_id, cluster_name, status
+            cluster_id, cluster_name, status, source
         )
         cur.execute(query, params)
-        logger.debug(f"Saved prediction for {race_id} (status: {status})")
+        logger.debug(f"Saved prediction for {race_id} (status: {status}, source: {source})")
         return True
+
 
 
 def save_recommended_bets(
@@ -529,9 +551,9 @@ def get_recommended_bets(race_id: str) -> List[Dict[str, Any]]:
         return [dict(zip(cols, row)) for row in rows]
 
 
-def get_dashboard_stats(date_str: Optional[str] = None) -> Dict[str, Any]:
+def get_dashboard_stats(date_str: Optional[str] = None, source: Optional[str] = 'auto') -> Dict[str, Any]:
     """
-    ダッシュボード用の KPI 統計集計 (テーブル未存在時は自動初期化 & セーフフォールバック)
+    ダッシュボード用の KPI 統計集計 (デフォルトで自動運用 source='auto' のみ集計)
     """
     default_stats = {
         'total_evaluated': 0,
@@ -545,11 +567,16 @@ def get_dashboard_stats(date_str: Optional[str] = None) -> Dict[str, Any]:
             cur = db.cursor()
             ph = "%s" if db.is_postgres else "?"
             
-            where_clause = ""
+            conditions = []
             params = []
             if date_str:
-                where_clause = f"WHERE race_date = {ph}"
+                conditions.append(f"race_date = {ph}")
                 params.append(date_str)
+            if source:
+                conditions.append(f"source = {ph}")
+                params.append(source)
+                
+            where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
                 
             # 1. 評価総数
             cur.execute(f"SELECT COUNT(*) FROM race_predictions {where_clause};", params)
@@ -565,7 +592,14 @@ def get_dashboard_stats(date_str: Optional[str] = None) -> Dict[str, Any]:
             go_count = cur.fetchone()[0] or 0
             
             # 4. 推奨投資総額
-            join_clause = f"JOIN race_predictions p ON b.race_id = p.race_id {where_clause.replace('race_date', 'p.race_date')}" if date_str else ""
+            join_conds = []
+            if date_str:
+                join_conds.append(f"p.race_date = {ph}")
+            if source:
+                join_conds.append(f"p.source = {ph}")
+            join_where = f"WHERE {' AND '.join(join_conds)}" if join_conds else ""
+            join_clause = f"JOIN race_predictions p ON b.race_id = p.race_id {join_where}" if join_where else ""
+            
             cur.execute(f"SELECT COALESCE(SUM(b.bet_amount), 0) FROM recommended_bets b {join_clause};", params)
             total_bet = cur.fetchone()[0] or 0
             
@@ -589,10 +623,11 @@ def get_all_predictions_with_bets(
     date_str: Optional[str] = None,
     status_filter: Optional[str] = None,
     venue_filter: Optional[str] = None,
+    source: Optional[str] = 'auto',
     limit: int = 100
 ) -> List[Dict[str, Any]]:
     """
-    推論結果と対応する推奨買い目を結合して取得 (テーブル未存在時は自動初期化 & セーフフォールバック)
+    推論結果と対応する推奨買い目を結合して取得 (デフォルトで自動運用 source='auto' のみ抽出)
     """
     try:
         with get_db_connection() as db:
@@ -605,6 +640,9 @@ def get_all_predictions_with_bets(
             if date_str:
                 conditions.append(f"p.race_date = {ph}")
                 params.append(date_str)
+            if source:
+                conditions.append(f"p.source = {ph}")
+                params.append(source)
             if status_filter and status_filter != 'all':
                 if status_filter == 'investment_go':
                     conditions.append("p.status IN ('investment_go', 'mock_investment_go', 'entertainment_go', 'hit_focused_go')")
@@ -623,7 +661,7 @@ def get_all_predictions_with_bets(
             query = f"""
             SELECT p.race_id, p.race_date, p.venue_code, p.venue_name, p.race_no,
                    p.deadline_time, p.top_boat, p.max_p1, p.prob_gap, p.gatekeeper_passed,
-                   p.cluster_id, p.cluster_name, p.status, p.created_at
+                   p.cluster_id, p.cluster_name, p.status, p.source, p.created_at
             FROM race_predictions p
             {where_sql}
             ORDER BY p.created_at DESC
@@ -632,6 +670,7 @@ def get_all_predictions_with_bets(
             cur.execute(query, params)
             cols = [desc[0] for desc in cur.description]
             races = [dict(zip(cols, row)) for row in cur.fetchall()]
+
             
             # 買い目を紐付け
             if races:

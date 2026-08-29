@@ -1152,7 +1152,8 @@ else:
                     race_id=race_id, race_date=date_str, venue_code=venue_code,
                     venue_name=venue_name, race_no=race_no, deadline_time="マニュアル",
                     top_boat=None, max_p1=None, prob_gap=None, gatekeeper_passed=False,
-                    cluster_id=cluster_id, cluster_name=cluster_name, status="skipped_cluster1"
+                    cluster_id=cluster_id, cluster_name=cluster_name, status="skipped_cluster1",
+                    source="manual"
                 )
             except Exception: pass
             st.stop()
@@ -1231,7 +1232,8 @@ else:
                     race_id=race_id, race_date=date_str, venue_code=venue_code,
                     venue_name=venue_name, race_no=race_no, deadline_time="マニュアル",
                     top_boat=top_boat, max_p1=max_p1, prob_gap=prob_gap, gatekeeper_passed=False,
-                    cluster_id=cluster_id, cluster_name=cluster_name, status="gatekeeper_skipped"
+                    cluster_id=cluster_id, cluster_name=cluster_name, status="gatekeeper_skipped",
+                    source="manual"
                 )
             except Exception: pass
             st.stop()
@@ -1330,10 +1332,11 @@ else:
                     race_id=race_id, race_date=date_str, venue_code=venue_code,
                     venue_name=venue_name, race_no=race_no, deadline_time="マニュアル",
                     top_boat=top_boat, max_p1=max_p1, prob_gap=prob_gap, gatekeeper_passed=True,
-                    cluster_id=cluster_id, cluster_name=cluster_name, status=status_success_name
+                    cluster_id=cluster_id, cluster_name=cluster_name, status=status_success_name,
+                    source="manual"
                 )
                 db_manager.save_recommended_bets(race_id, bets, benter_probs_dict, all_odds)
-                st.caption(f"💾 推論結果および推奨買い目を Supabase データベースに自動保存しました (Status: `{status_success_name}`)。")
+                st.caption(f"💾 推論結果および推奨買い目を Supabase データベースに自動保存しました (Status: `{status_success_name}`, Source: `manual`)。")
             except Exception as e:
                 st.caption(f"⚠️ DB保存例外: {e}")
         else:
@@ -1343,7 +1346,9 @@ else:
                     race_id=race_id, race_date=date_str, venue_code=venue_code,
                     venue_name=venue_name, race_no=race_no, deadline_time="マニュアル",
                     top_boat=top_boat, max_p1=max_p1, prob_gap=prob_gap, gatekeeper_passed=True,
-                    cluster_id=cluster_id, cluster_name=cluster_name, status="no_value_bets"
+                    cluster_id=cluster_id, cluster_name=cluster_name, status="no_value_bets",
+                    source="manual"
                 )
             except Exception: pass
+
 
