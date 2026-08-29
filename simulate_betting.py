@@ -48,7 +48,10 @@ KELLY_FRACTION_DEFAULT = 0.25   # Fractional Kelly 係数 (クォーター・ケ
 import db_manager
 
 def get_db_connection():
+    if os.path.exists(DB_PATH):
+        return sqlite3.connect(DB_PATH)
     return db_manager.get_db_connection()
+
 
 
 def load_all_odds_batch(db, race_ids):
@@ -87,12 +90,16 @@ def run_simulation(
     kelly_fraction: float = KELLY_FRACTION_DEFAULT,
     use_cluster_benter: bool = True,
     exclude_cluster1: bool = False,
+    use_dynamic_ev: bool = True,
+    use_fractional_pool: bool = True,
     model_honmei_path: str = MODEL_HONMEI_PATH,
     model_residual_path: str = MODEL_RESIDUAL_PATH
 ):
     """
     Gatekeeper (85th percentile) & Extractor (クラスタ別Benter) & 最適化バックテスト
     exclude_cluster1=True の場合、難水面 (戸田02, 江戸川03, 平和島04, 鳴門14, 福岡22) を Gatekeeper 前に即時除外
+    use_dynamic_ev=True の場合、オッズ連動型動的EV閾値（低オッズ緩和・高オッズ厳格化）を適用
+    use_fractional_pool=True の場合、100円未満端数をプールしてEV最上位へ+100円繰り上げ配分
     """
     t_start_total = time.time()
     
@@ -109,7 +116,9 @@ def run_simulation(
     print(f"  Gatekeeper スクリーニング  : 上位 {100.0 - percentile_th:.1f}% 分位点 ({percentile_th:.1f}th percentile 動的閾値)", flush=True)
     print(f"  難水面 (Cluster 1) 除外    : {'有効 (戸田02, 江戸川03, 平和島04, 鳴門14, 福岡22 を完全除外)' if exclude_cluster1 else '無効 (全水面対象)'}", flush=True)
     print(f"  Benter 展開モード          : {'会場クラスタ別動的最適化 (Cluster 0, 1, 2)' if use_cluster_benter else '固定値 (d2=0.40, d3=0.60)'}", flush=True)
-    print(f"  Optimizer 厳格化制約       : EV >= {min_ev:.2f}, Odds <= {max_odds:.1f}, λ = {risk_aversion:.1f}", flush=True)
+    print(f"  動的EV閾値 (オッズ連動)    : {'有効 (低オッズ 1.10〜 / 基準 1.25 / 高オッズ 〜1.40)' if use_dynamic_ev else f'無効 (一律 EV >= {min_ev:.2f})'}", flush=True)
+    print(f"  端数プール再分配           : {'有効 (100円未満端数をEV最上位へ再投下)' if use_fractional_pool else '無効 (100円未満切り捨て)'}", flush=True)
+    print(f"  Optimizer 厳格化制約       : 基準EV >= {min_ev:.2f}, Odds <= {max_odds:.1f}, λ = {risk_aversion:.1f}", flush=True)
     if kelly_fraction is not None and kelly_fraction > 0:
         print(f"  資金配分モデル             : Fractional Kelly (f = {kelly_fraction:.2f}, レース動的上限 <= 10.0%, 買い目上限 {max_concentration:.1%})", flush=True)
     else:
@@ -117,14 +126,19 @@ def run_simulation(
     print("-" * 75, flush=True)
 
 
+
     # 1. DBから対象Race IDを取得 & オッズ一括ロード
     print("  [1/4] DBから対象レース & 最新オッズデータを一括キャッシュ中...", flush=True)
     conn = get_db_connection()
     cursor = conn.cursor()
-    ph = "%s" if getattr(conn, 'is_postgres', False) else "?"
-    order_clause = "id DESC" if getattr(conn, 'is_postgres', False) else "rowid DESC"
-    cursor.execute(f"SELECT DISTINCT race_id FROM odds_data ORDER BY {order_clause} LIMIT {ph}", [max_races])
+    is_pg = getattr(conn, 'is_postgres', False)
+    ph = "%s" if is_pg else "?"
+    if is_pg:
+        cursor.execute(f"SELECT race_id FROM (SELECT race_id, MAX(id) as max_id FROM odds_data GROUP BY race_id ORDER BY max_id DESC LIMIT {ph}) s;", [max_races])
+    else:
+        cursor.execute(f"SELECT DISTINCT race_id FROM odds_data ORDER BY rowid DESC LIMIT {ph};", [max_races])
     valid_races = [row[0] for row in cursor.fetchall()]
+
     valid_races_set = set(valid_races)
     print(f"        -> 抽出レース数: {len(valid_races):,} レース", flush=True)
     
@@ -319,7 +333,9 @@ def run_simulation(
                 max_concentration=max_concentration,
                 min_ev=min_ev,
                 max_odds=max_odds,
-                kelly_fraction=kelly_fraction
+                kelly_fraction=kelly_fraction,
+                use_dynamic_ev=use_dynamic_ev,
+                use_fractional_pool=use_fractional_pool
             )
             
         t_extractor_opt += (time.time() - t0_sub)
@@ -495,6 +511,10 @@ if __name__ == "__main__":
     parser.add_argument('--kelly_fraction', type=float, default=0.0, help="Fractional Kelly fraction (0.0 for fixed weight, default: 0.0)")
     parser.add_argument('--use_cluster_benter', action='store_true', default=True, help="Use cluster-specific Benter parameters")
     parser.add_argument('--exclude_cluster1', action='store_true', default=False, help="Exclude Cluster 1 (difficult water) races before Gatekeeper")
+    parser.add_argument('--use_dynamic_ev', action='store_true', default=True, help="Use dynamic EV thresholds based on odds")
+    parser.add_argument('--disable_dynamic_ev', dest='use_dynamic_ev', action='store_false', help="Disable dynamic EV thresholds")
+    parser.add_argument('--use_fractional_pool', action='store_true', default=True, help="Use fractional rounding pool to reallocate <=100 JPY remainders")
+    parser.add_argument('--disable_fractional_pool', dest='use_fractional_pool', action='store_false', help="Disable fractional rounding pool")
     parser.add_argument('--model_honmei', type=str, default=MODEL_HONMEI_PATH, help="Path to Gatekeeper honmei model")
     parser.add_argument('--model_residual', type=str, default=MODEL_RESIDUAL_PATH, help="Path to Extractor residual model")
     
@@ -511,7 +531,10 @@ if __name__ == "__main__":
         kelly_fraction=args.kelly_fraction,
         use_cluster_benter=args.use_cluster_benter,
         exclude_cluster1=args.exclude_cluster1,
+        use_dynamic_ev=args.use_dynamic_ev,
+        use_fractional_pool=args.use_fractional_pool,
         model_honmei_path=args.model_honmei,
         model_residual_path=args.model_residual
     )
+
 
