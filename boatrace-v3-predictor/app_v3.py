@@ -46,8 +46,14 @@ from probability_calibration import (
     get_cluster_benter_params,
     load_benter_cluster_config
 )
+import importlib
 from portfolio_optimizer import PortfolioOptimizer, load_correlation_mask
 import db_manager
+try:
+    importlib.reload(db_manager)
+except Exception:
+    pass
+
 
 # Page Config
 st.set_page_config(
@@ -845,13 +851,22 @@ if app_mode == "📊 自動運用ダッシュボード (Auto Dashboard)":
     with col_c3:
         if st.button("🏁 結果即時更新", help="公式から最新の確定着順・払戻金を取得して的中判定と収支を更新します", use_container_width=True):
             import auto_trader
+            try:
+                importlib.reload(db_manager)
+                importlib.reload(auto_trader)
+            except Exception:
+                pass
             with st.spinner("公式レース結果を取得・精算中..."):
-                settled = auto_trader.settle_race_results(selected_date)
-            if settled:
-                st.success(f"🎉 {len(settled)} 件のレース結果を確定・更新しました！")
-            else:
-                st.info("未確定レースはありませんでした（または結果未発表）。")
+                try:
+                    settled = auto_trader.settle_race_results(selected_date)
+                    if settled:
+                        st.success(f"🎉 {len(settled)} 件のレース結果を確定・更新しました！")
+                    else:
+                        st.info("未確定レースはありませんでした（または結果未発表）。")
+                except Exception as e:
+                    st.error(f"結果精算エラー: {e}")
             st.rerun()
+
             
     with col_c4:
         if st.button("🧪 モック推論生成", help="テスト用の模擬投資GOレースを生成してDBへ保存します", use_container_width=True):

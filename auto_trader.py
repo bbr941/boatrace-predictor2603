@@ -36,6 +36,13 @@ except Exception:
 DISCORD_WEBHOOK_URL = os.getenv('DISCORD_WEBHOOK_URL', '')
 
 # 自作モジュールのインポート
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+PARENT_DIR = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
+for p in [CURRENT_DIR, PARENT_DIR]:
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+import importlib
 from odds_normalizer import probs_to_init_scores
 from probability_calibration import (
     calculate_benter_probs,
@@ -1074,9 +1081,17 @@ def settle_race_results(
     """
     未確定レースの結果を公式から取得し、推奨買い目と照合して確定損益をSupabaseへ反映
     """
-    unresolved = db_manager.get_unresolved_predictions(date_str=target_date, source=source)
+    if not hasattr(db_manager, 'get_unresolved_predictions'):
+        try:
+            import importlib
+            importlib.reload(db_manager)
+        except Exception:
+            pass
+            
+    unresolved = db_manager.get_unresolved_predictions(date_str=target_date, source=source) if hasattr(db_manager, 'get_unresolved_predictions') else []
     if not unresolved:
         return []
+
         
     logger.info(f"🔍 [SETTLEMENT] {len(unresolved)} 件の未確定レースの結果確認を開始します...")
     settled_results = []
