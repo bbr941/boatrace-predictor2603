@@ -242,21 +242,30 @@ def train_and_compare_models(df: pd.DataFrame, split_date: str = '2026-01-01'):
 
     enhanced_features = baseline_features + new_cross_features
 
-    # データ分割
-    train_mask = df['race_date'] < split_date
-    test_mask = df['race_date'] >= split_date
+    # データ分割 (自動時系列スプリット判定)
+    unique_dates = sorted(df['race_date'].dropna().unique())
+    if split_date is None or df['race_date'].max() < split_date or df['race_date'].min() >= split_date:
+        split_idx = int(len(unique_dates) * 0.8)
+        effective_split_date = unique_dates[split_idx]
+    else:
+        effective_split_date = split_date
+
+    train_mask = df['race_date'] < effective_split_date
+    test_mask = df['race_date'] >= effective_split_date
 
     # 1着が確定している有効レコードのみ
     valid_mask = df['finish_order'].notna() & (df['finish_order'] > 0)
     train_df = df[train_mask & valid_mask].copy()
     test_df = df[test_mask & valid_mask].copy()
 
+    print(f"  実効データ分割基準日      : {effective_split_date} (Train: ~{effective_split_date}前日, Test: {effective_split_date}~)")
     print(f"  学習データ (Train) レコード数: {len(train_df):,} 行 ({len(train_df)//6:,} レース)")
     print(f"  検証データ (Test)  レコード数: {len(test_df):,} 行 ({len(test_df)//6:,} レース)")
     print("-" * 75, flush=True)
 
     y_train = train_df['is_win'].values
     y_test = test_df['is_win'].values
+
 
     lgb_params = {
         'objective': 'binary',
