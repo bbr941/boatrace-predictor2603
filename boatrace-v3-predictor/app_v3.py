@@ -31,6 +31,8 @@ import re
 import time
 import itertools
 import json
+from typing import Dict, List, Tuple, Optional, Any
+
 
 from odds_normalizer import probs_to_init_scores
 from probability_calibration import (
@@ -657,9 +659,88 @@ def prepare_features_for_model(df_feat, model):
     return df_out
 
 
+def calculate_dutching_bets(
+    benter_probs: Dict[str, float],
+    odds_dict: Dict[str, float],
+    budget: int = 1000,
+    target_cum_prob: float = 0.50,
+    max_combos: int = 8,
+    min_combos: int = 2
+) -> Dict[str, int]:
+    """
+    的中特化: 累積確率50%（最大8点）を抽出し、
+    オッズ逆数和によるダッチング資金配分とトリガミ回避ループを実行
+    """
+    # 1. 確率降順ソート & 有効オッズフィルタ (Odds > 1.0)
+    valid_combos = []
+    for combo, prob in sorted(benter_probs.items(), key=lambda x: x[1], reverse=True):
+        o = odds_dict.get(combo, 0.0)
+        if o > 1.0 and prob > 0:
+            valid_combos.append((combo, prob, o))
+            
+    if not valid_combos:
+        return {}
+        
+    # 2. 累積確率50% または 最大8点まで抽出 (最低2点)
+    selected = []
+    cum_p = 0.0
+    for item in valid_combos:
+        selected.append(item)
+        cum_p += item[1]
+        if (cum_p >= target_cum_prob or len(selected) >= max_combos) and len(selected) >= min_combos:
+            break
+            
+    if len(selected) < min_combos:
+        selected = valid_combos[:min(len(valid_combos), min_combos)]
+        
+    # 3. トリガミ回避ループ (オッズ逆数和 S < 0.95)
+    while len(selected) > min_combos:
+        s_val = sum(1.0 / o for _, _, o in selected)
+        if s_val < 0.95:
+            break
+        # オッズ逆数和が 0.95 以上の場合は末尾（確率最下位）を削除して再計算
+        selected.pop()
+        
+    # 4. 予算配分 (100円丸め、最低100円)
+    def allocate(combos_list, target_budget):
+        s = sum(1.0 / o for _, _, o in combos_list)
+        if s <= 0:
+            return {c: 100 for c, _, _ in combos_list}
+        res = {}
+        for c, _, o in combos_list:
+            raw = target_budget * ((1.0 / o) / s)
+            amt = max(100, int(round(raw / 100.0)) * 100)
+            res[c] = amt
+        return res
+        
+    bets = allocate(selected, budget)
+    
+    # 5. 最終トリガミ検証 & 微調整ループ
+    for _ in range(5):
+        tot = sum(bets.values())
+        trigami_found = False
+        for c, _, o in list(selected):
+            payout = bets.get(c, 0) * o
+            if payout <= tot:
+                trigami_found = True
+                # 100円追加でガミりを解消可能か判定
+                if (bets[c] + 100) * o > (tot + 100):
+                    bets[c] += 100
+                elif len(selected) > min_combos:
+                    # 解消困難な場合は最下位買い目を削除して再配分
+                    selected.pop()
+                    bets = allocate(selected, budget)
+                    break
+        if not trigami_found:
+            break
+            
+    return bets
+
+
 # =====================================================================
 # 2. Sidebar Navigation & Global Controls
 # =====================================================================
+
 
 # DB 初期化 (自動マイグレーション)
 try:
@@ -916,13 +997,13 @@ else:
         [
             "🏆 ガチ投資（黄金ベースライン）",
             "🍿 エンタメ（多参戦・微バリュー）",
-            "🎯 的中特化（確率上位5点買い）"
+            "🎯 的中特化（動的ダッチング・トリガミ回避）"
         ],
         index=0,
         help=(
             "・🏆 ガチ投資: 厳格なGatekeeper足切り(P1>=74.38%)、難水面スキップ、EV>=1.25で長期期待値を最大化。\n"
             "・🍿 エンタメ: 全水面参戦、Gatekeeper制限解除、EV>=1.05で高回転勝負。\n"
-            "・🎯 的中特化: EV・オッズ無視でAIが予測した展開確率TOP5に均等100円投資。"
+            "・🎯 的中特化: 累積確率50%（最大8点）を抽出し、どの買い目が的中しても利益が出るようオッズ逆数比で資金配分（ダッチング＆トリガミ自動回避）。"
         )
     )
 
@@ -945,9 +1026,9 @@ else:
         default_max_odds = 100.0
         status_success_name = "entertainment_go"
 
-    else:  # "🎯 的中特化（確率上位5点買い）"
+    else:  # "🎯 的中特化（動的ダッチング・トリガミ回避）"
         mode_key = "hit_focused"
-        mode_badge_html = '<span class="badge-win" style="background-color:#D500F9; color:#fff; font-size:1.0em; padding:5px 12px; font-weight:700;">🎯 的中特化モード（確率上位5点買い）</span>'
+        mode_badge_html = '<span class="badge-win" style="background-color:#D500F9; color:#fff; font-size:1.0em; padding:5px 12px; font-weight:700;">🎯 的中特化モード（動的ダッチング・トリガミ回避）</span>'
         default_gk_th = 0.0000
         skip_cluster1 = False
         default_min_ev = 0.00
@@ -999,15 +1080,21 @@ else:
     # モードに応じたパラメーター入力セクション
     st.sidebar.markdown("---")
     if mode_key == "hit_focused":
-        st.sidebar.header("🎯 的中特化 設定")
-        top_n_bets = st.sidebar.slider("抽出点数 (上位N点)", min_value=1, max_value=10, value=5, step=1)
-        fixed_bet_amount = st.sidebar.number_input("1点あたり投資額 (円)", min_value=100, max_value=10000, value=100, step=100)
+        st.sidebar.header("🎯 的中特化（ダッチング配分）設定")
+        hit_budget = st.sidebar.slider(
+            "1レースあたりの予算 (円)",
+            min_value=300,
+            max_value=10000,
+            value=1000,
+            step=100,
+            help="指定した予算内で、どの買い目が的中してもトリガミ（ガミり）にならないようにオッズ連動で資金を自動配分します。"
+        )
         gatekeeper_th = 0.0
-        bankroll = 100000.0
+        bankroll = float(hit_budget)
         risk_aversion = 1.0
         min_ev = 0.0
         max_odds = 999.0
-        strategy_choice = "均等配分 (Fixed 100円)"
+        strategy_choice = f"動的ダッチング (予算 {hit_budget:,}円)"
     else:
         st.sidebar.header("🛡️ Gatekeeper & 資金配分設定")
         
@@ -1174,10 +1261,15 @@ else:
 
         # 買い目選出 & 資金配分
         if mode_key == "hit_focused":
-            # 的中特化モード: Benter 確率上位 N 点を抽出
-            sorted_by_prob = sorted(benter_probs_dict.items(), key=lambda x: x[1], reverse=True)
-            top_combos = sorted_by_prob[:top_n_bets]
-            bets = {c: int(fixed_bet_amount) for c, _ in top_combos}
+            # 的中特化モード: 動的ダッチング & トリガミ回避
+            bets = calculate_dutching_bets(
+                benter_probs=benter_probs_dict,
+                odds_dict=all_odds,
+                budget=int(hit_budget),
+                target_cum_prob=0.50,
+                max_combos=8,
+                min_combos=2
+            )
         else:
             # ガチ投資 & エンタメモード: ポートフォリオ最適化 (SLSQP / Markowitz)
             optimizer = PortfolioOptimizer()
@@ -1201,12 +1293,18 @@ else:
         
         if bets:
             total_bet = sum(bets.values())
-            max_ret = max([amt * all_odds.get(c, 0.0) for c, amt in bets.items()])
+            returns = [amt * all_odds.get(c, 0.0) for c, amt in bets.items()]
+            max_ret = max(returns) if returns else 0.0
+            min_ret = min(returns) if returns else 0.0
             
             r1, r2, r3 = st.columns(3)
             with r1: st.metric("推奨選出 買い目数", f"{len(bets)} 点")
-            with r2: st.metric("推奨投資総額", f"{total_bet:,} 円", delta=f"資金比率: {total_bet/bankroll:.1%}" if mode_key != "hit_focused" else None)
-            with r3: st.metric("最高払戻見込額", f"{int(max_ret):,} 円")
+            with r2: st.metric("推奨投資総額", f"{total_bet:,} 円", delta=f"設定予算: {int(bankroll):,}円" if mode_key == "hit_focused" else f"資金比率: {total_bet/bankroll:.1%}")
+            with r3:
+                if mode_key == "hit_focused":
+                    st.metric("見込払戻レンジ", f"{int(min_ret):,} 〜 {int(max_ret):,} 円", delta=f"最低純利益: {int(min_ret - total_bet):+,}円")
+                else:
+                    st.metric("最高払戻見込額", f"{int(max_ret):,} 円")
             
             res_rows = []
             for combo, amt in sorted(bets.items(), key=lambda x: (x[1], benter_probs_dict.get(x[0], 0.0)), reverse=True):
@@ -1214,13 +1312,15 @@ else:
                 o = all_odds.get(combo, 0.0)
                 ev = p * o
                 est_ret = int(amt * o)
+                net_profit = est_ret - total_bet
                 res_rows.append({
                     '買い目': combo,
                     '推奨投資額 (円)': f"{amt:,} 円",
                     'Benter確率': f"{p:.2%}",
                     '実オッズ': f"{o:.1f} 倍" if o > 0 else "-",
                     'EV (期待値)': f"{ev:.2f}",
-                    '払戻見込 (円)': f"{est_ret:,} 円" if o > 0 else "-"
+                    '払戻見込 (円)': f"{est_ret:,} 円" if o > 0 else "-",
+                    '純利益 (円)': f"{net_profit:+,} 円" if o > 0 else "-"
                 })
             st.dataframe(pd.DataFrame(res_rows), use_container_width=True, hide_index=True)
             
