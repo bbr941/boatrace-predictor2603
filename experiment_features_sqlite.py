@@ -312,9 +312,8 @@ def train_and_compare_models(df: pd.DataFrame, split_date: str = '2026-01-01'):
     
     # レース単位 Top-1 的中精度 (最も予測確率が高い艇が1着になった割合)
     test_df['pred_base'] = preds_base
-    top1_base_correct = test_df.groupby('race_id').apply(
-        lambda g: g.loc[g['pred_base'].idxmax(), 'is_win'] == 1
-    ).mean()
+    idx_max_base = test_df.groupby('race_id')['pred_base'].idxmax()
+    top1_base_correct = test_df.loc[idx_max_base, 'is_win'].mean()
 
     # ----------------------------------------------------
     # 2. 新規特徴量追加モデルの学習
@@ -344,9 +343,8 @@ def train_and_compare_models(df: pd.DataFrame, split_date: str = '2026-01-01'):
     brier_enh = brier_score_loss(y_test, preds_enh)
 
     test_df['pred_enh'] = preds_enh
-    top1_enh_correct = test_df.groupby('race_id').apply(
-        lambda g: g.loc[g['pred_enh'].idxmax(), 'is_win'] == 1
-    ).mean()
+    idx_max_enh = test_df.groupby('race_id')['pred_enh'].idxmax()
+    top1_enh_correct = test_df.loc[idx_max_enh, 'is_win'].mean()
 
     # ----------------------------------------------------
     # 3. 精度比較レポート出力
@@ -383,14 +381,15 @@ def train_and_compare_models(df: pd.DataFrame, split_date: str = '2026-01-01'):
     print(f"  Rank | Feature Name                 | Category           | Gain Ratio | Split Count")
     print(f"  -----+------------------------------+--------------------+------------+------------")
     for i, row in feat_imp_df.head(20).iterrows():
-        is_new_mark = "🌟" if row['Type'].startswith('新規') else "  "
+        is_new_mark = "🌟" if str(row['Type']).startswith('新規') else "  "
         print(f"  {i+1:>4d} | {row['Feature']:<28} | {row['Type']:<18} | {row['Gain_Ratio (%)']:>9.2f}% | {row['Split_Count']:>10d} {is_new_mark}")
     print("-" * 75, flush=True)
 
     # 新規特徴量の合計Gain寄与度
-    new_gain_sum = feat_imp_df[feat_imp_df['Type'].startswith('新規')]['Gain_Ratio (%)'].sum()
+    new_gain_sum = feat_imp_df[feat_imp_df['Type'].str.startswith('新規')]['Gain_Ratio (%)'].sum()
     print(f"  🌟 新規環境クロス・モメンタム特徴量の総合寄与度: {new_gain_sum:.2f}%")
     print("=" * 75 + "\n", flush=True)
+
 
     return {
         'auc_base': auc_base,
