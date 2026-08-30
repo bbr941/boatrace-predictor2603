@@ -448,7 +448,10 @@ def add_advanced_features(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df['corrected_st'] = 0.20
         
+    if 'race_id' not in df.columns:
+        df['race_id'] = 'single_race'
     df = df.sort_values(['race_id', 'boat_number'])
+
     prev_sts = df['corrected_st'].shift(1)
     df['inner_st_gap_corrected'] = df['corrected_st'] - prev_sts
     df.loc[df['boat_number'] == 1, 'inner_st_gap_corrected'] = 0.0
@@ -509,9 +512,79 @@ def add_advanced_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def fetch_series_momentum(venue_code: int, racer_ids: list, race_date: str = None) -> dict:
+    """
+    対象会場・今節（同一会場で過去7日以内〜当日）における出走選手の過去展示タイム履歴をDBから取得し、
+    前走展示タイム差 (ex_momentum_diff) および 節間平均偏差 (ex_momentum_deviation) を算出する。
+    """
+    momentum_dict = {rid: {'ex_momentum_diff': 0.0, 'ex_momentum_deviation': 0.0} for rid in racer_ids}
+    if not racer_ids:
+        return momentum_dict
+
+    sqlite_paths = ['boatrace.db', r'D:\BOAT2504_Base_line\BOAT2504_DB\boatrace.db']
+    sqlite_db = None
+    for sp in sqlite_paths:
+        if os.path.exists(sp):
+            sqlite_db = sp
+            break
+
+    try:
+        if sqlite_db:
+            import sqlite3
+            conn = sqlite3.connect(sqlite_db)
+            cursor = conn.cursor()
+            placeholders = ','.join(['?'] * len(racer_ids))
+            
+            if race_date:
+                date_filter = "AND r.race_date <= ?"
+                params = [venue_code] + list(racer_ids) + [race_date]
+            else:
+                date_filter = ""
+                params = [venue_code] + list(racer_ids)
+
+            query = f"""
+            SELECT re.racer_id, bi.exhibition_time
+            FROM before_info bi
+            JOIN races r ON bi.race_id = r.race_id
+            JOIN race_entries re ON bi.race_id = re.race_id AND bi.boat_number = re.boat_number
+            WHERE r.venue_code = ?
+              AND re.racer_id IN ({placeholders})
+              {date_filter}
+              AND bi.exhibition_time > 0
+            ORDER BY r.race_date ASC, r.race_number ASC
+            """
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            conn.close()
+            
+            racer_times = {}
+            for r_id, ex_time in rows:
+                r_id = int(r_id)
+                if r_id not in racer_times:
+                    racer_times[r_id] = []
+                racer_times[r_id].append(float(ex_time))
+                
+            for r_id in racer_ids:
+                times = racer_times.get(r_id, [])
+                if len(times) >= 2:
+                    current_ex = times[-1]
+                    prev_ex = times[-2]
+                    exp_mean = np.mean(times)
+                    momentum_dict[r_id]['ex_momentum_diff'] = float(current_ex - prev_ex)
+                    momentum_dict[r_id]['ex_momentum_deviation'] = float(current_ex - exp_mean)
+                elif len(times) == 1:
+                    momentum_dict[r_id]['ex_momentum_diff'] = 0.0
+                    momentum_dict[r_id]['ex_momentum_deviation'] = 0.0
+    except Exception as e:
+        logger.debug(f"fetch_series_momentum error: {e}")
+        
+    return momentum_dict
+
+
+
 class FeatureEngineer:
     @staticmethod
-    def process(df: pd.DataFrame, venue_name: str) -> pd.DataFrame:
+    def process(df: pd.DataFrame, venue_name: str, race_date: str = None) -> pd.DataFrame:
         df['venue_name'] = venue_name
         try:
             r_course = pd.read_csv(os.path.join(DATA_DIR, 'static_racer_course.csv'))
@@ -536,7 +609,8 @@ class FeatureEngineer:
                 'AvgStartTiming': 'course_avg_st',
                 'Nige': 'nige_count', 
                 'Makuri': 'makuri_count',
-                'Sashi': 'sashi_count'
+                'Sashi': 'sashi_count',
+                'Makurizashi': 'makurizashi_count'
             }, inplace=True)
 
             venue_map_rev = {
@@ -564,7 +638,7 @@ class FeatureEngineer:
             df = df.merge(r_params, on='racer_id', how='left')
         except Exception: pass
         
-        required_cols = ['makuri_count', 'nige_count', 'sashi_count', 'nat_win_rate', 'course_run_count', 'local_win_rate']
+        required_cols = ['makuri_count', 'nige_count', 'sashi_count', 'makurizashi_count', 'nat_win_rate', 'course_run_count', 'local_win_rate']
         for c in required_cols:
             if c not in df.columns: df[c] = 0.0
             
@@ -616,8 +690,14 @@ class FeatureEngineer:
         df['ex_diff_from_race_min'] = (df['exhibition_time'] - min_t).fillna(0.0)
         df['ex_diff_from_race_mean'] = (df['exhibition_time'] - mean_t).fillna(0.0)
         df['ex_rank_in_race'] = df['linear_rank']
-        df['ex_momentum_diff'] = 0.0
-        df['ex_momentum_deviation'] = 0.0
+        
+        # 節間展示タイムモメンタム（動的DBクエリ結果をマッピング）
+        racer_ids_list = df['racer_id'].dropna().astype(int).tolist()
+        v_code_val = int(df['venue_code_int'].iloc[0]) if 'venue_code_int' in df.columns and len(df) > 0 else 1
+        momentum_map = fetch_series_momentum(v_code_val, racer_ids_list, race_date)
+        
+        df['ex_momentum_diff'] = df['racer_id'].map(lambda r: momentum_map.get(int(r), {}).get('ex_momentum_diff', 0.0)).fillna(0.0)
+        df['ex_momentum_deviation'] = df['racer_id'].map(lambda r: momentum_map.get(int(r), {}).get('ex_momentum_deviation', 0.0)).fillna(0.0)
         
         if 'weight_x' in df.columns: df['weight'] = df['weight_x']
         if 'weight' not in df.columns: df['weight'] = 52.0
@@ -632,6 +712,7 @@ class FeatureEngineer:
         df['wind_makurizashi_cross'] = df['wind_speed'] * df['makurizashi_rate']
         df['strong_wind_outer_adv'] = df['is_strong_wind'] * (df['boat_number'] >= 3).astype(float)
         df['wind_nige_vulnerability'] = df['wind_speed'] * (1.0 - df['nige_rate']) * (df['boat_number'] == 1).astype(float)
+
 
         df['wave_weight_prod'] = df['wave_height'] * df['weight']
         df['wave_weight_ratio'] = df['wave_height'] / np.maximum(df['weight'], 40.0)
@@ -692,7 +773,11 @@ def prepare_features_for_model(df_feat: pd.DataFrame, model: lgb.Booster) -> pd.
         if f in cat_cols_map:
             cat_list = cat_cols_map[f]
             if f in df_feat.columns:
-                val_series = df_feat[f].astype(str)
+                raw_val = df_feat[f]
+                if isinstance(raw_val, pd.DataFrame):
+                    val_series = raw_val.iloc[:, 0].astype(str)
+                else:
+                    val_series = raw_val.astype(str)
             elif f == 'venue_code_y' and 'venue_code_int' in df_feat.columns:
                 val_series = df_feat['venue_code_int'].astype(str).str.zfill(2)
             elif f == 'venue_code_y' and 'temp_venue_code' in df_feat.columns:
@@ -702,13 +787,17 @@ def prepare_features_for_model(df_feat: pd.DataFrame, model: lgb.Booster) -> pd.
             df_out[f] = pd.Categorical(val_series, categories=cat_list)
         else:
             if f in df_feat.columns:
-                df_out[f] = pd.to_numeric(df_feat[f], errors='coerce').fillna(0.0).astype(float)
+                raw_val = df_feat[f]
+                if isinstance(raw_val, pd.DataFrame):
+                    raw_val = raw_val.iloc[:, 0]
+                df_out[f] = pd.to_numeric(raw_val, errors='coerce').fillna(0.0).astype(float)
             elif f == 'syn_win_rate':
                 df_out[f] = 0.0
             else:
                 df_out[f] = 0.0
                 
     return df_out
+
 
 
 # =====================================================================
@@ -938,8 +1027,9 @@ def evaluate_race(
         logger.debug(f"オッズ保存エラー: {e}")
         
     # 3. 特徴量エンジニアリング & 欠場艇動的補正
-    df_feat = FeatureEngineer.process(df_race, venue_name)
+    df_feat = FeatureEngineer.process(df_race, venue_name, race_date=date_str)
     active_boats = df_feat['boat_number'].tolist()
+
     absent_boats = sorted(list(set(range(1, 7)) - set(active_boats)))
     if absent_boats:
         absent_str = "、".join([f"{b}号艇" for b in absent_boats])
@@ -1279,8 +1369,9 @@ def evaluate_mock_race(
     except Exception: pass
 
     # 特徴量生成
-    df_feat = FeatureEngineer.process(df_race, v_name)
+    df_feat = FeatureEngineer.process(df_race, v_name, race_date=date_str)
     active_boats = df_feat['boat_number'].tolist()
+
     
     syn_dict = {b: 0.0 for b in active_boats}
     for combo, o_val in all_odds.items():
