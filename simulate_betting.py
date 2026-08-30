@@ -32,8 +32,9 @@ from portfolio_optimizer import PortfolioOptimizer, load_correlation_mask
 # ==========================================
 MODEL_HONMEI_PATH = 'model_honmei.txt'
 MODEL_RESIDUAL_PATH = 'model_residual.txt'
-DATA_PATH = 'boatrace_dataset_labeled_v2.csv'
+DATA_PATH = 'train_data_full.csv' if os.path.exists('train_data_full.csv') else 'boatrace_dataset_labeled_v2.csv'
 DB_PATH = 'boatrace.db' if os.path.exists('boatrace.db') else r'D:\BOAT2504_Base_line\BOAT2504_DB\boatrace.db'
+
 
 BANKROLL_DEFAULT = 100000.0     # 初期想定バンクロール (円)
 RISK_AVERSION_DEFAULT = 1.0     # リスク回避度 λ
@@ -65,8 +66,9 @@ def load_all_odds_batch(db, race_ids):
     for i in range(0, len(race_ids), chunk_size):
         chunk_rids = race_ids[i:i + chunk_size]
         placeholders = ','.join([ph] * len(chunk_rids))
-        query = f"SELECT race_id, combination, odds_1min FROM odds_data WHERE race_id IN ({placeholders}) AND length(combination) = 3"
+        query = f"SELECT race_id, combination, odds_1min FROM odds_data WHERE race_id IN ({placeholders})"
         cursor.execute(query, chunk_rids)
+
         for rid, comb_db, val in cursor.fetchall():
             comb_str = str(comb_db)
             if len(comb_str) == 3:
@@ -127,43 +129,36 @@ def run_simulation(
 
 
 
-    # 1. DBから対象Race IDを取得 & オッズ一括ロード
-    print("  [1/4] DBから対象レース & 最新オッズデータを一括キャッシュ中...", flush=True)
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    is_pg = getattr(conn, 'is_postgres', False)
-    ph = "%s" if is_pg else "?"
-    if is_pg:
-        cursor.execute(f"SELECT race_id FROM (SELECT race_id, MAX(id) as max_id FROM odds_data GROUP BY race_id ORDER BY max_id DESC LIMIT {ph}) s;", [max_races])
+    # 1. データセットから直近対象レースを抽出
+    print(f"  [1/4] データセット ({DATA_PATH}) から直近 {max_races:,} レースを高速抽出中...", flush=True)
+    t_load_start = time.time()
+    if os.path.exists(DATA_PATH):
+        df_all = pd.read_csv(DATA_PATH)
+        df_unique_races = df_all[['race_id', 'race_date']].drop_duplicates('race_id').sort_values('race_date', ascending=False)
+        valid_races = df_unique_races['race_id'].head(max_races).tolist()
+        valid_races_set = set(valid_races)
+        df_matched = df_all[df_all['race_id'].isin(valid_races_set)].copy()
     else:
-        cursor.execute(f"SELECT DISTINCT race_id FROM odds_data ORDER BY rowid DESC LIMIT {ph};", [max_races])
-    valid_races = [row[0] for row in cursor.fetchall()]
-
-    valid_races_set = set(valid_races)
-    print(f"        -> 抽出レース数: {len(valid_races):,} レース", flush=True)
-    
-    if not valid_races:
-        print("❌ エラー: 対象レースIDが取得できませんでした。DB接続を確認してください。")
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT race_id FROM races ORDER BY race_date DESC LIMIT {max_races};")
+        valid_races = [row[0] for row in cursor.fetchall()]
+        valid_races_set = set(valid_races)
         conn.close()
+        df_matched = pd.DataFrame()
+        
+    print(f"        -> 抽出レース数: {len(valid_races):,} レース ({len(df_matched):,} 行, {time.time() - t_load_start:.2f}秒)", flush=True)
+    
+    if not valid_races or df_matched.empty:
+        print("❌ エラー: 対象レースデータが取得できませんでした。")
         return
 
+    # 2. オッズデータを一括キャッシュ
+    print("  [2/4] DBからオッズデータを一括キャッシュ中...", flush=True)
+    conn = get_db_connection()
     odds_cache = load_all_odds_batch(conn, valid_races)
     conn.close()
 
-    # 2. CSVから該当レースの特徴量データを抽出
-    print("  [2/4] CSVからレース特徴量を高速チャンク抽出中...", flush=True)
-    t_load_start = time.time()
-    chunks = []
-    for chunk in pd.read_csv(DATA_PATH, chunksize=150000):
-        matched = chunk[chunk['race_id'].isin(valid_races_set)]
-        if len(matched) > 0:
-            chunks.append(matched)
-            
-    if not chunks:
-        print("❌ エラー: CSV内に一致するレースが見つかりませんでした。")
-        return
-        
-    df_matched = pd.concat(chunks, ignore_index=True)
     
     # 会場コードマップ事前保存
     race_venue_map = {}
