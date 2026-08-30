@@ -7,6 +7,8 @@ import os
 import sys
 import datetime
 import sqlite3
+import pandas as pd
+import numpy as np
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -15,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from app_boatrace import BoatRaceScraper, VENUE_MAP
 from auto_trader import FeatureEngineer, fetch_series_momentum
+
 
 # 対象ナイター会場
 NIGHTER_VENUES = [
