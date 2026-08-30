@@ -573,22 +573,23 @@ def fetch_series_momentum(venue_code: int, racer_ids: list, race_date: str = Non
             
             if race_date:
                 date_filter = "AND r.race_date <= ?"
-                params = [venue_code] + list(racer_ids) + [race_date]
+                params = [int(venue_code)] + [int(r) for r in racer_ids] + [race_date]
             else:
                 date_filter = ""
-                params = [venue_code] + list(racer_ids)
+                params = [int(venue_code)] + [int(r) for r in racer_ids]
 
             query = f"""
             SELECT re.racer_id, bi.exhibition_time
             FROM before_info bi
             JOIN races r ON bi.race_id = r.race_id
             JOIN race_entries re ON bi.race_id = re.race_id AND bi.boat_number = re.boat_number
-            WHERE r.venue_code = ?
+            WHERE CAST(r.venue_code AS INTEGER) = ?
               AND re.racer_id IN ({placeholders})
               {date_filter}
               AND bi.exhibition_time > 0
             ORDER BY r.race_date ASC, r.race_number ASC
             """
+
             cursor.execute(query, params)
             rows = cursor.fetchall()
             conn.close()
