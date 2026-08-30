@@ -770,8 +770,26 @@ class FeatureEngineer:
         df['local_win_rate'] = pd.to_numeric(df['local_win_rate'], errors='coerce').fillna(0.0)
         df['local_perf_diff'] = df['local_win_rate'] - df['nat_win_rate']
 
-        def wind_deg_from_int(x): return (x - 1) * 22.5 if 1 <= x <= 16 else 0
-        df['wind_angle_deg'] = df['wind_direction'].apply(wind_deg_from_int)
+        wind_dir_to_angle = {
+            '北': 0.0, '北北東': 22.5, '北東': 45.0, '東北東': 67.5, '東': 90.0, '東南東': 112.5,
+            '南東': 135.0, '南南東': 157.5, '南': 180.0, '南南西': 202.5, '南西': 225.0, '西南西': 247.5,
+            '西': 270.0, '西北西': 292.5, '北西': 315.0, '北北西': 337.5
+        }
+        def wind_deg_from_val(x):
+            try:
+                if isinstance(x, (int, float)) and not np.isnan(x):
+                    ix = int(x)
+                    return (ix - 1) * 22.5 if 1 <= ix <= 16 else 0.0
+                if isinstance(x, str):
+                    if x.isdigit():
+                        ix = int(x)
+                        return (ix - 1) * 22.5 if 1 <= ix <= 16 else 0.0
+                    return wind_dir_to_angle.get(x, 0.0)
+            except Exception:
+                pass
+            return 0.0
+
+        df['wind_angle_deg'] = df['wind_direction'].apply(wind_deg_from_val)
         venue_tailwind_from = {
             '桐生': 135, '戸田': 90, '江戸川': 180, '平和島': 180, '多摩川': 270,
             '浜名湖': 180, '蒲郡': 270, '常滑': 270, '津': 135, '三国': 180,
@@ -792,6 +810,9 @@ class FeatureEngineer:
         }
         if pd.api.types.is_numeric_dtype(df['wind_direction']):
             df['wind_direction'] = df['wind_direction'].map(wind_map).fillna(df['wind_direction']).astype(str).replace('nan', '')
+        else:
+            df['wind_direction'] = df['wind_direction'].astype(str).replace('nan', '')
+
 
         for col in df.columns:
             if col not in ['race_id', 'race_date', 'venue_name', 'prior_results', 'wind_direction', 'branch', 'class', 'racer_class', 'venue_code_y']:
