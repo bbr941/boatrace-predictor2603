@@ -66,6 +66,14 @@ def verify_race_momentum(race_id: str, db_path: str = 'boatrace.db'):
     """
     df_entries = pd.read_sql_query(query_entries, conn)
     
+    # racer_nameが欠損している場合、静的データから名前を補完
+    try:
+        r_params = pd.read_csv('data/static_racer_params.csv')
+        name_map = dict(zip(r_params['racer_id'], r_params['racer_name']))
+        df_entries['racer_name'] = df_entries['racer_name'].fillna(df_entries['racer_id'].map(name_map))
+    except Exception:
+        pass
+    
     # 環境カラムの付与
     df_entries['wind_speed'] = race_row['wind_speed']
     df_entries['wind_direction'] = race_row['wind_direction']
@@ -73,21 +81,22 @@ def verify_race_momentum(race_id: str, db_path: str = 'boatrace.db'):
     df_entries['venue_code'] = venue_code
     df_entries['pred_course'] = df_entries['boat_number']
 
-    # 3. 節間の生履歴（展示タイム）を直接クエリして検証用データを抽出
+    # 3. 節間（直近7日以内〜当日）の生履歴（展示タイム）をクエリ
     racer_ids = df_entries['racer_id'].tolist()
     ph = ','.join(['?'] * len(racer_ids))
     query_history = f"""
-    SELECT r.race_id, r.race_date, r.race_number, re.boat_number, re.racer_id, re.racer_name, bi.exhibition_time
+    SELECT r.race_id, r.race_date, r.race_number, re.boat_number, re.racer_id, bi.exhibition_time
     FROM before_info bi
     JOIN races r ON bi.race_id = r.race_id
     JOIN race_entries re ON bi.race_id = re.race_id AND bi.boat_number = re.boat_number
     WHERE CAST(r.venue_code AS INTEGER) = ?
       AND re.racer_id IN ({ph})
+      AND r.race_date >= date(?, '-7 days')
       AND r.race_date <= ?
       AND bi.exhibition_time > 0
     ORDER BY re.racer_id, r.race_date ASC, r.race_number ASC
     """
-    df_history = pd.read_sql_query(query_history, conn, params=[venue_code] + racer_ids + [race_date])
+    df_history = pd.read_sql_query(query_history, conn, params=[venue_code] + racer_ids + [race_date, race_date])
     conn.close()
 
     # 4. FeatureEngineer による本番パイプライン特徴量生成
@@ -105,7 +114,7 @@ def verify_race_momentum(race_id: str, db_path: str = 'boatrace.db'):
     for idx, row in df_feat.iterrows():
         b_num = int(row['boat_number'])
         r_id = int(row['racer_id'])
-        r_name = str(row['racer_name'])
+        r_name = str(row['racer_name']) if pd.notna(row['racer_name']) else f"登番{r_id}"
         cur_ex = float(row['exhibition_time'])
         
         # 履歴から前走・平均を計算

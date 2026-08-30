@@ -572,10 +572,10 @@ def fetch_series_momentum(venue_code: int, racer_ids: list, race_date: str = Non
             placeholders = ','.join(['?'] * len(racer_ids))
             
             if race_date:
-                date_filter = "AND r.race_date <= ?"
-                params = [int(venue_code)] + [int(r) for r in racer_ids] + [race_date]
+                date_filter = "AND r.race_date >= date(?, '-7 days') AND r.race_date <= ?"
+                params = [int(venue_code)] + [int(r) for r in racer_ids] + [race_date, race_date]
             else:
-                date_filter = ""
+                date_filter = "AND r.race_date >= date('now', '-7 days')"
                 params = [int(venue_code)] + [int(r) for r in racer_ids]
 
             query = f"""
@@ -589,6 +589,7 @@ def fetch_series_momentum(venue_code: int, racer_ids: list, race_date: str = Non
               AND bi.exhibition_time > 0
             ORDER BY r.race_date ASC, r.race_number ASC
             """
+
 
             cursor.execute(query, params)
             rows = cursor.fetchall()
