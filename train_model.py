@@ -4,10 +4,14 @@ import lightgbm as lgb
 import matplotlib.pyplot as plt
 import re
 import os
+import shutil
+import argparse
+from sklearn.metrics import ndcg_score
 
 # Config
-DATA_PATH = 'boatrace_dataset_labeled_v2.csv'
+DATA_PATH = 'train_data_full.csv' if os.path.exists('train_data_full.csv') else 'boatrace_dataset_labeled_v2.csv'
 MODEL_HONMEI = 'model_honmei.txt'
+MODEL_HONMEI_BACKUP = 'model_honmei_backup.txt'
 MODEL_ANA = 'model_ana.txt'
 
 def preprocess_data(df):
@@ -20,22 +24,8 @@ def preprocess_data(df):
     df = add_advanced_features(df)
     
     # 1. Base Cleanup / Type Conversion
-    # Convert object columns to category for LGBM
-    # Exclude ID/Date columns from Feature consideration automatically later,
-    # but valid "text" features might be category.
-    
-    # Explicitly ignore non-feature columns for categorical conversion check if needed,
-    # but generally safe to convert all objects.
-    
-    # However, 'race_date' might be object.
-    # 'race_id', 'boat_number', 'racer_id', 'rank' are numeric/IDs.
-    
-    # Define potential feature candidates (all columns)
-    # We will filter them later per model.
     for col in df.columns:
         if df[col].dtype == 'object':
-            # Check if it looks categorical or just ID
-            # 'race_id' is unique per race, not useful as category usually (too high cardinality).
             if col not in ['race_id', 'race_date', 'prior_results']:
                 df[col] = df[col].astype('category')
     
@@ -44,137 +34,82 @@ def preprocess_data(df):
     df['relevance'] = df['rank'].map({1: 10, 2: 7, 3: 4}).fillna(0)
     
     # Fill NaN
-    # LightGBM handles NaN, but syn_win_rate NaN should probably be 0
     if 'syn_win_rate' in df.columns:
-        df['syn_win_rate'] = df['syn_win_rate'].fillna(0)
+        df['syn_win_rate'] = pd.to_numeric(df['syn_win_rate'], errors='coerce').fillna(0.0)
+
+    # 欠損補完 (LightGBM ranker 互換性確保)
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    df[numeric_cols] = df[numeric_cols].fillna(0.0)
 
     return df
 
 def add_advanced_features(df):
-    print("  - Adding Advanced Features (Market Distortion)...")
+    print("  - Adding Advanced Features (Market Distortion & Performance Gaps)...")
     
     # 1. F (Flying) Analysis & ST Correction
-    # Parse 'prior_results' like "[4 5 F 1]"
-    # Regex look for 'F'
     if 'prior_results' in df.columns:
         df['is_F_holder'] = df['prior_results'].astype(str).apply(lambda x: 1 if 'F' in x else 0)
     else:
         df['is_F_holder'] = 0
         
-    # Corrected ST (Penalty +0.05 if F holder)
-    # Use 'course_avg_st' if available, otherwise 'avg_st' or similar. 
-    # Validating col availability:
     st_col = 'course_avg_st' if 'course_avg_st' in df.columns else 'exhibition_start_timing' 
-    # Note: Training data might use 'avg_start_timing' or 'course_avg_st'.
-    
     if st_col in df.columns:
         df['corrected_st'] = df[st_col] + (df['is_F_holder'] * 0.05)
     else:
-        df['corrected_st'] = 0.20 # Default
+        df['corrected_st'] = 0.20
         
-    # Update/Create 'inner_st_gap' using corrected_st
-    # Race-wise operation. Requires GroupBy or sorting.
-    # To be efficient, we can do: sorted by race_id, boat_number.
-    # Then shift.
-    # Ensure sorted
     df = df.sort_values(['race_id', 'boat_number'])
     
-    # Inner ST Gap: Me - Inner Boat. (Positive = I am Slower)
-    # GroupBy shift is slow. Fast vector approach:
-    # Shifted ST
     prev_race_ids = df['race_id'].shift(1)
     prev_sts = df['corrected_st'].shift(1)
     
-    # Where race_id matches, gap = my_st - prev_st. Boat 1 has 0 gap.
     df['inner_st_gap_corrected'] = df['corrected_st'] - prev_sts
-    # Mask where race_id changed (Boat 1)
     df.loc[df['race_id'] != prev_race_ids, 'inner_st_gap_corrected'] = 0.0
     
     # 2. Motor Evaluation Gap (Motor Rank - Tenji Rank)
-    # Lower Rank is Better (1st).
-    # Motor Rate: Higher is Better -> Rank Descending
-    # Ex Time: Lower is Better -> Rank Ascending
-    
-    # GroupBy Rank
-    # Use 'transform' for speed
-    df['motor_rank'] = df.groupby('race_id')['motor_rate'].rank(ascending=False, method='min')
-    df['tenji_rank'] = df.groupby('race_id')['exhibition_time'].rank(ascending=True, method='min')
-    df['motor_gap'] = df['motor_rank'] - df['tenji_rank']
-    # Interpretation: MotorRank(6=Bad) - TenjiRank(1=Good) = +5 (Good Gap: Numbers bad but running well)
+    if 'motor_rate' in df.columns and 'exhibition_time' in df.columns:
+        df['motor_rank'] = df.groupby('race_id')['motor_rate'].rank(ascending=False, method='min')
+        df['tenji_rank'] = df.groupby('race_id')['exhibition_time'].rank(ascending=True, method='min')
+        df['motor_gap'] = df['motor_rank'] - df['tenji_rank']
+    else:
+        df['motor_rank'] = 3.5
+        df['tenji_rank'] = 3.5
+        df['motor_gap'] = 0.0
     
     # 3. Specialist Gap
-    # course_1st_rate - nat_win_rate
-    # Check cols
     if 'course_1st_rate' in df.columns and 'nat_win_rate' in df.columns:
         df['specialist_score'] = df['course_1st_rate'] - df['nat_win_rate']
     else:
         df['specialist_score'] = 0.0
         
     # 4. Winning Move Match
-    # 2-Course Sashi Potential: (2c Sashi% / 1c Nige%)
-    # 3-Course Makuri Potential: (3c Makuri% * 2c AvgST Rank)
-    
-    # We need access to neighbor's stats.
-    # Using shift again.
-    
-    # 1-Course Nige Rate (from Boat 1)
-    # We need to broadcast Boat 1's Nige Rate to Boat 2.
-    # Actually, simpler: Nige Rate of inner boat.
-    
-    # Shifted Nige (Inner Boat Nige)
-    inner_nige = df['nige_count'].shift(1) # Assuming nige_count is rate or count? Prompt said "count/run".
-    # We likely have rates or counts. Let's assume rate if normalized, or just use raw count if consistent.
-    # 'nige_count' in existing feature engineering is raw count. 'course_run_count' is denominator.
-    
-    # Rate calculation helper
     def calc_rate(count_col, run_col):
-        return df[count_col] / (df[run_col] + 1.0) # avoid 0 div
+        return df[count_col] / (df[run_col] + 1.0)
     
     if 'nige_count' in df.columns and 'course_run_count' in df.columns:
         df['my_nige_rate'] = calc_rate('nige_count', 'course_run_count')
-        df['my_sashi_rate'] = calc_rate('sashi_count', 'course_run_count')
-        df['my_makuri_rate'] = calc_rate('makuri_count', 'course_run_count')
+        df['my_sashi_rate'] = calc_rate('sashi_count', 'course_run_count') if 'sashi_count' in df.columns else 0.0
+        df['my_makuri_rate'] = calc_rate('makuri_count', 'course_run_count') if 'makuri_count' in df.columns else 0.0
         
-        # Shift rates
         inner_nige_rate = df['my_nige_rate'].shift(1)
-        
-        # 2-Course Sashi Potential
-        # Sashi Potential = My Sashi Rate / Inner Nige Rate (Small inner nige -> High Sashi opp)
-        # Avoid 0 div
         df['sashi_potential'] = df['my_sashi_rate'] / (inner_nige_rate + 0.01)
-        # Only valid for Boat 2? Or generally "Sashi against inner"?
-        # Prompt said "2-Course Sashi Expectation". So valid when Boat=2.
-        # But we can generalize to "Sashi vs Inner".
-        df.loc[df['boat_number'] == 1, 'sashi_potential'] = 0
+        df.loc[df['boat_number'] == 1, 'sashi_potential'] = 0.0
         
-        # 3-Course Makuri Potential
-        # Need Inner Boat's ST Rank.
-        # ST Rank in Race.
         df['st_rank'] = df.groupby('race_id')['corrected_st'].rank(ascending=True)
         inner_st_rank = df['st_rank'].shift(1)
-        
-        # Makuri Potential = My Makuri Rate * Inner ST Rank (Larger Rank=Slower=Good for Makuri)
         df['makuri_potential'] = df['my_makuri_rate'] * inner_st_rank
-        df.loc[df['boat_number'] == 1, 'makuri_potential'] = 0
-        
-        # Cleanup temp cols if necessary, or keep as features
-        
+        df.loc[df['boat_number'] == 1, 'makuri_potential'] = 0.0
     else:
         df['sashi_potential'] = 0.0
         df['makuri_potential'] = 0.0
 
-    # 5. Venue Frame Bias (from Deme_Ranking)
-    # Load bias table
+    # 5. Venue Frame Bias
     bias_path = 'app_data/venue_frame_bias.csv'
     if os.path.exists(bias_path):
         bias_df = pd.read_csv(bias_path)
-        # Ensure Types
         bias_df['venue_code'] = bias_df['venue_code'].astype(str).str.zfill(2)
         bias_df['boat_number'] = bias_df['boat_number'].astype(int)
         
-        # Prepare DF venue_code
-        # Assuming venue_name exists. Map Name -> Code.
-        # Standard 24 Venue Map
         venue_map = {
             '桐生': '01', '戸田': '02', '江戸川': '03', '平和島': '04', '多摩川': '05',
             '浜名湖': '06', '蒲郡': '07', '常滑': '08', '津': '09', '三国': '10',
@@ -184,37 +119,24 @@ def add_advanced_features(df):
         }
         
         if 'venue_name' in df.columns:
-            # Create temp join col
             df['temp_venue_code'] = df['venue_name'].map(venue_map).fillna('00')
-            
-            # Merge
             df = df.merge(bias_df, left_on=['temp_venue_code', 'boat_number'], right_on=['venue_code', 'boat_number'], how='left')
-            
-            # Drop temp/redundant
             df.drop(columns=['temp_venue_code', 'venue_code'], inplace=True, errors='ignore')
-            
-            # Fill NaNs (some venues might be missing?)
-            df['venue_frame_win_rate'] = df['venue_frame_win_rate'].fillna(df.groupby('boat_number')['venue_frame_win_rate'].transform('mean'))
-            df['venue_frame_win_rate'] = df['venue_frame_win_rate'].fillna(0.16) # Fallback 1/6
-            
+            df['venue_frame_win_rate'] = df['venue_frame_win_rate'].fillna(df.groupby('boat_number')['venue_frame_win_rate'].transform('mean')).fillna(0.16)
         else:
-            df['venue_frame_win_rate'] = 0.0
+            df['venue_frame_win_rate'] = 0.16
     else:
-        df['venue_frame_win_rate'] = 0.0
+        df['venue_frame_win_rate'] = 0.16
         
     # 6. Rank-based features
     if 'racer_rank' in df.columns:
         rank_map = {'A1': 4, 'A2': 3, 'B1': 2, 'B2': 1}
-        df['rank_numeric'] = df['racer_rank'].map(rank_map).fillna(0)
+        df['rank_numeric'] = df['racer_rank'].map(rank_map).fillna(2).astype(int)
         
-        # level_adjusted_win_rate
         if 'nat_win_rate' in df.columns:
             df['level_adjusted_win_rate'] = df['nat_win_rate'] * df['rank_numeric']
-            
-            # rank_skill_gap
             rank_means = df.groupby('racer_rank')['nat_win_rate'].transform('mean')
-            df['rank_skill_gap'] = df['nat_win_rate'] - rank_means
-            df['rank_skill_gap'] = df['rank_skill_gap'].fillna(0.0)
+            df['rank_skill_gap'] = (df['nat_win_rate'] - rank_means).fillna(0.0)
         else:
             df['level_adjusted_win_rate'] = 0.0
             df['rank_skill_gap'] = 0.0
@@ -222,32 +144,32 @@ def add_advanced_features(df):
     return df
 
 def get_features(df, mode='honmei'):
-    # Common ignore list
-    # Ensure new features are NOT here.
+    # Non-feature columns to exclude
     base_ignore = [
         'race_id', 'boat_number', 'racer_id', 'rank', 'relevance',
-        'race_date', # Date usually not a direct feature unless processed
-        'venue_name', # captured by venue_code or category
-        'racer_rank', # raw string, replaced by rank_numeric
-        'prior_results', # Raw string
-        'weight_for_loss', # Internal column
-        'pred_score', # artifact
-        
-        # Intermediate / Redundant
-        'is_F_holder', 'temp_venue_code',
+        'race_date', 'venue_name', 'racer_rank', 'prior_results',
+        'weight_for_loss', 'pred_score', 'is_F_holder', 'temp_venue_code',
         'my_nige_rate', 'my_sashi_rate', 'my_makuri_rate', 'st_rank',
-
-        # Low Importance / Noisy Features (Step 1 Optimization)
-        'tenji_rank', 'is_linear_leader', 'high_wind_alert', 
-        'inner_st_gap', 'course_avg_st', 'exhibition_start_timing',
-        'wave_height', 'wind_direction', 'wind_vector_lat', 'wind_vector_long',
-        'makuri_count', 'sashi_count', 
-        'venue_course_2nd_rate', 'venue_course_3rd_rate',
-        'boat_rate', # Low importance (4507) vs Motor (higher usually)
-        'venue_code_x' # ID-like
+        'venue_code_x', 'venue_code_int', 'ana_relevance', 'weight_ana', 'proxy_odds',
+        'weather', 'nige_count', 'makuri_count', 'makurizashi_count', 'sashi_count',
+        'wintech_races_run', 'wintech_wins'
     ]
     
-    # Features derived from odds (Forbidden in Ana)
+    odds_features = [
+        'syn_win_rate', 'odds', 'prediction_odds', 'popularity', 
+        'vote_count', 'win_share'
+    ]
+    
+    all_cols = df.columns.tolist()
+    candidates = [c for c in all_cols if c not in base_ignore]
+    
+    if mode == 'ana':
+        final_feats = [c for c in candidates if not any(o in c for o in odds_features)]
+        return final_feats
+    else:
+        # Honmei: Use all valid numeric and categorical features
+        return candidates
+
     odds_features = [
         'syn_win_rate', 'odds', 'prediction_odds', 'popularity', 
         'vote_count', 'win_share' # Add any other odds-derived names
@@ -270,30 +192,43 @@ def get_features(df, mode='honmei'):
                 final_feats.append(c)
         return final_feats
     else:
-        # Honmei: Use everything including odds
+        # Honmei: Use all valid numeric and categorical features
         return candidates
 
-def train_lgb_ranker(df, features, model_path, weight_col=None, label_col='relevance'):
+def train_lgb_ranker(df, features, model_path, weight_col=None, label_col='relevance', split_date='2026-01-01'):
     print(f"\nTraining Model: {model_path} | Features: {len(features)}")
+
     
-    # Split
-    unique_races = df['race_id'].unique()
-    split_idx = int(len(unique_races) * 0.8)
-    train_races = unique_races[:split_idx]
-    test_races = unique_races[split_idx:]
+    # データをレース単位でソート
+    df = df.sort_values(['race_date', 'race_id', 'boat_number']).reset_index(drop=True)
     
-    train_df = df[df['race_id'].isin(train_races)]
-    test_df = df[df['race_id'].isin(test_races)]
+    # 時系列分割 (Out-of-Time: 2026年〜)
+    unique_dates = sorted(df['race_date'].dropna().unique())
+    if split_date is None or df['race_date'].max() < split_date or df['race_date'].min() >= split_date:
+        split_idx = int(len(unique_dates) * 0.8)
+        effective_split_date = unique_dates[split_idx]
+    else:
+        effective_split_date = split_date
+        
+    train_mask = df['race_date'] < effective_split_date
+    test_mask = df['race_date'] >= effective_split_date
     
-    # Groups
-    train_grp = train_df.groupby('race_id').size().to_numpy()
-    test_grp = test_df.groupby('race_id').size().to_numpy()
+    train_df = df[train_mask].copy()
+    test_df = df[test_mask].copy()
+    
+    print(f"  実効データ分割基準日      : {effective_split_date} (Train: ~{effective_split_date}前日, Test: {effective_split_date}~)")
+    print(f"  学習データ (Train) レコード数: {len(train_df):,} 行 ({train_df['race_id'].nunique():,} レース)")
+    print(f"  検証データ (Test)  レコード数: {len(test_df):,} 行 ({test_df['race_id'].nunique():,} レース)")
+    print("-" * 75, flush=True)
+    
+    # Groups (レースごとの出走頭数)
+    train_grp = train_df.groupby('race_id', sort=False).size().to_numpy()
+    test_grp = test_df.groupby('race_id', sort=False).size().to_numpy()
     
     # Weights
     w_train = None
-    if weight_col:
+    if weight_col and weight_col in train_df.columns:
         w_train = train_df[weight_col].to_numpy()
-        # Ensure no negative weights
         w_train = np.maximum(w_train, 0.0)
 
     # Dataset
@@ -308,124 +243,201 @@ def train_lgb_ranker(df, features, model_path, weight_col=None, label_col='relev
         'learning_rate': 0.05,
         'num_leaves': 31,
         'min_data_in_leaf': 20,
+        'feature_fraction': 0.85,
+        'bagging_fraction': 0.85,
+        'bagging_freq': 1,
         'verbose': -1,
-        'random_state': 42
+        'random_state': 42,
+        'n_jobs': -1
     }
     
     model = lgb.train(
         params,
         dtrain,
         valid_sets=[dtrain, dtest],
+        valid_names=['train', 'test'],
         num_boost_round=1000,
         callbacks=[
-            lgb.early_stopping(stopping_rounds=50),
+            lgb.early_stopping(stopping_rounds=50, verbose=False),
             lgb.log_evaluation(period=100)
         ]
     )
     
-    model.save_model(model_path)
-    return model, test_df
+    if model_path:
+        model.save_model(model_path)
+        print(f"Model saved to: {model_path}")
+    
+    return model, train_df, test_df
 
-def evaluate_trifecta(model, df, features, label):
-    print(f"Evaluating {label}...")
-    df['pred_score'] = model.predict(df[features])
+
+def calc_dcg(relevances, k=3):
+    rel = np.asarray(relevances)[:k]
+    if len(rel) == 0:
+        return 0.0
+    gains = (2.0 ** rel) - 1.0
+    discounts = np.log2(np.arange(len(rel)) + 2.0)
+    return float(np.sum(gains / discounts))
+
+def calc_ndcg(relevance_array, pred_scores, k=3):
+    order = np.argsort(pred_scores)[::-1]
+    pred_rel = np.asarray(relevance_array)[order]
+    ideal_rel = np.sort(np.asarray(relevance_array))[::-1]
     
-    # 3連単 (Trifecta) Evaluation
-    predictions = df.groupby('race_id').apply(
-        lambda x: x.sort_values('pred_score', ascending=False)['boat_number'].tolist()
-    )
-    actuals = df.groupby('race_id').apply(
-        lambda x: x.sort_values('rank', ascending=True)['boat_number'].tolist()
-    )
+    dcg = calc_dcg(pred_rel, k)
+    idcg = calc_dcg(ideal_rel, k)
+    return (dcg / idcg) if idcg > 0 else 1.0
+
+def evaluate_model_performance(model, test_df, features, label, old_model_path=None):
+    print(f"\n" + "=" * 75)
+    print(f"  📊 Out-of-Time 予測精度評価レポート: {label}")
+    print("=" * 75)
     
-    total = 0
-    exact3 = 0
+    test_copy = test_df.copy()
+    test_copy['pred_new'] = model.predict(test_copy[features])
     
-    # Use index intersection to match races
-    common_idx = predictions.index.intersection(actuals.index)
+    def calc_metrics(df_in, pred_col):
+        # 1. Top-1 予想的中率 (最上位予測艇が1着になった割合)
+        idx_top1 = df_in.groupby('race_id')[pred_col].idxmax()
+        top1_acc = (df_in.loc[idx_top1, 'rank'] == 1).mean()
+        
+        # 2. 3連単 (Trifecta Top-1) 予想的中率
+        def is_trifecta_match(g):
+            if len(g) < 3: return False
+            p_top3 = g.sort_values(pred_col, ascending=False)['boat_number'].values[:3]
+            a_top3 = g.sort_values('rank', ascending=True)['boat_number'].values[:3]
+            return np.array_equal(p_top3, a_top3)
+        
+        trifecta_acc = df_in.groupby('race_id').apply(is_trifecta_match, include_groups=False).mean()
+        
+        # 3. NDCG@1, @2, @3
+        ndcg_list = {1: [], 2: [], 3: []}
+        for _, g in df_in.groupby('race_id'):
+            if len(g) < 3: continue
+            y_true = g['relevance'].values
+            y_score = g[pred_col].values
+            if y_true.max() > 0:
+                for k in [1, 2, 3]:
+                    ndcg_list[k].append(calc_ndcg(y_true, y_score, k=k))
+                    
+        return {
+            'top1_acc': top1_acc,
+            'trifecta_acc': trifecta_acc,
+            'ndcg1': np.mean(ndcg_list[1]),
+            'ndcg2': np.mean(ndcg_list[2]),
+            'ndcg3': np.mean(ndcg_list[3])
+        }
     
-    for rid in common_idx:
-        p = predictions[rid][:3]
-        a = actuals[rid][:3]
-        if len(p) == 3 and len(a) == 3:
-            total += 1
-            if p == a:
-                exact3 += 1
-                
-    if total > 0:
-        print(f"[{label}] Trifecta Accuracy: {exact3/total:.2%} ({exact3}/{total})")
+    m_new = calc_metrics(test_copy, 'pred_new')
+
+    
+    m_old = None
+    if old_model_path and os.path.exists(old_model_path):
+        try:
+            old_model = lgb.Booster(model_file=old_model_path)
+            old_feats = old_model.feature_name()
+            missing_old = [f for f in old_feats if f not in test_copy.columns]
+            if not missing_old:
+                test_copy['pred_old'] = old_model.predict(test_copy[old_feats])
+                m_old = calc_metrics(test_copy, 'pred_old')
+        except Exception as e:
+            print(f"  (Note: 旧モデル比較スキップ: {e})")
+            
+    print(f"  指標 (Metric)             | 旧モデル (ベースライン) | 新モデル (再学習)   | 改善効果 (差分)")
+    print(f"  --------------------------+-------------------------+---------------------+-----------------")
+    
+    if m_old:
+        print(f"  NDCG@1                    | {m_old['ndcg1']:>23.5f} | {m_new['ndcg1']:>19.5f} | {m_new['ndcg1'] - m_old['ndcg1']:>+15.5f} {'(向上)' if m_new['ndcg1'] > m_old['ndcg1'] else ''}")
+        print(f"  NDCG@2                    | {m_old['ndcg2']:>23.5f} | {m_new['ndcg2']:>19.5f} | {m_new['ndcg2'] - m_old['ndcg2']:>+15.5f} {'(向上)' if m_new['ndcg2'] > m_old['ndcg2'] else ''}")
+        print(f"  NDCG@3                    | {m_old['ndcg3']:>23.5f} | {m_new['ndcg3']:>19.5f} | {m_new['ndcg3'] - m_old['ndcg3']:>+15.5f} {'(向上)' if m_new['ndcg3'] > m_old['ndcg3'] else ''}")
+        print(f"  Top-1 的中率 (1着)        | {m_old['top1_acc']:>22.2%} | {m_new['top1_acc']:>18.2%} | {m_new['top1_acc'] - m_old['top1_acc']:>+14.2%} pt")
+        print(f"  3連単 完全的中率          | {m_old['trifecta_acc']:>22.2%} | {m_new['trifecta_acc']:>18.2%} | {m_new['trifecta_acc'] - m_old['trifecta_acc']:>+14.2%} pt")
     else:
-        print(f"[{label}] No valid races for evaluation.")
+        print(f"  NDCG@1                    | {'-':>23} | {m_new['ndcg1']:>19.5f} | {'-':>15}")
+        print(f"  NDCG@2                    | {'-':>23} | {m_new['ndcg2']:>19.5f} | {'-':>15}")
+        print(f"  NDCG@3                    | {'-':>23} | {m_new['ndcg3']:>19.5f} | {'-':>15}")
+        print(f"  Top-1 的中率 (1着)        | {'-':>23} | {m_new['top1_acc']:>18.2%} | {'-':>15}")
+        print(f"  3連単 完全的中率          | {'-':>23} | {m_new['trifecta_acc']:>18.2%} | {'-':>15}")
+    print("=" * 75 + "\n")
+    
+    return m_new, m_old
+
+def print_feature_importance(model, features, top_n=25):
+    gain = model.feature_importance(importance_type='gain')
+    split = model.feature_importance(importance_type='split')
+    total_gain = sum(gain)
+    
+    new_cross_features = [
+        'wind_makuri_cross', 'strong_wind_makuri', 'wind_makurizashi_cross',
+        'strong_wind_outer_adv', 'wind_nige_vulnerability',
+        'wave_weight_prod', 'wave_weight_ratio', 'high_wave_heavy_penalty', 'high_wave_inner_risk',
+        'ex_diff_from_race_min', 'ex_diff_from_race_mean', 'ex_rank_in_race',
+        'ex_momentum_diff', 'ex_momentum_deviation', 'makurizashi_rate',
+        'is_strong_wind', 'is_gale_wind', 'is_high_wave'
+    ]
+    
+    feat_df = pd.DataFrame({
+        'Feature': features,
+        'Type': ['🌟 新規(クロス/モメンタム)' if f in new_cross_features else '従来(ベースライン)' for f in features],
+        'Gain': gain,
+        'Gain_Ratio (%)': (gain / total_gain) * 100.0,
+        'Split_Count': split
+    }).sort_values(by='Gain', ascending=False).reset_index(drop=True)
+    
+    print("=" * 75)
+    print(f"  🏆 Feature Importance ランキング (Gain 寄与度順 Top {top_n})")
+    print("=" * 75)
+    print(f"  Rank | Feature Name                 | Category                | Gain Ratio | Split Count")
+    print(f"  -----+------------------------------+-------------------------+------------+------------")
+    for i, row in feat_df.head(top_n).iterrows():
+        is_new_mark = "🌟" if "新規" in str(row['Type']) else "  "
+        print(f"  {i+1:>4d} | {row['Feature']:<28} | {row['Type']:<23} | {row['Gain_Ratio (%)']:>9.2f}% | {row['Split_Count']:>10d} {is_new_mark}")
+    print("-" * 75)
+    
+    new_gain_sum = feat_df[feat_df['Type'].str.contains('新規')]['Gain_Ratio (%)'].sum()
+    print(f"  🌟 新規環境クロス・モメンタム特徴量の総合寄与度: {new_gain_sum:.2f}%")
+    print("=" * 75 + "\n")
+    return feat_df
 
 def main():
-    if not os.path.exists(DATA_PATH):
-        print(f"Data not found: {DATA_PATH}")
+    parser = argparse.ArgumentParser(description="Train Boatrace LightGBM Models")
+    parser.add_argument('--data', type=str, default=DATA_PATH, help="Path to CSV dataset")
+    parser.add_argument('--split_date', type=str, default='2026-01-01', help="Out-of-Time split date")
+    parser.add_argument('--save_model', action='store_true', default=True, help="Save trained model to model_honmei.txt")
+    
+    args = parser.parse_args()
+    
+    if not os.path.exists(args.data):
+        print(f"Data not found: {args.data}")
         return
     
-    df = pd.read_csv(DATA_PATH)
+    print(f"Loading dataset from: {args.data} ...")
+    df = pd.read_csv(args.data)
     df = preprocess_data(df)
     
-    # --- Model A: Honmei (Accuracy) ---
+    # --- Model A: Honmei (Accuracy - LambdaRank) ---
     feats_honmei = get_features(df, mode='honmei')
-    model_h, test_h = train_lgb_ranker(df, feats_honmei, MODEL_HONMEI, weight_col=None)
-    evaluate_trifecta(model_h, test_h, feats_honmei, "Honmei")
+    print(f"\nHonmei Model Features ({len(feats_honmei)}): {feats_honmei}")
     
-    # --- Model B: Ana (Recovery/Payout - Special Tuning) ---
-    print("\n--- Configuring Ana Model (High Dividend Special) ---")
+    # バックアップの作成
+    if os.path.exists(MODEL_HONMEI):
+        shutil.copyfile(MODEL_HONMEI, MODEL_HONMEI_BACKUP)
+        print(f"Existing model backed up to: {MODEL_HONMEI_BACKUP}")
     
-    # 1. Calculate Proxy Odds (1 / syn_win_rate)
-    if 'syn_win_rate' in df.columns:
-        # Avoid division by zero
-        df['proxy_odds'] = df['syn_win_rate'].apply(lambda x: 1.0/x if x > 0.001 else 1.0)
-    else:
-        df['proxy_odds'] = 1.0 # Fallback
-        
-    # 2. Define Custom Relevance for Ana
-    # Base: Copy relevance
-    df['ana_relevance'] = df['relevance'].copy()
+    model_h, train_df, test_df = train_lgb_ranker(df, feats_honmei, MODEL_HONMEI, weight_col=None, split_date=args.split_date)
     
-    # Mask: Winning Boat (Rank 1)
-    mask_win = (df['rank'] == 1)
+    # 精度評価
+    evaluate_model_performance(model_h, test_df, feats_honmei, "Honmei (LambdaRank)", old_model_path=MODEL_HONMEI_BACKUP)
     
-    # Strategy 1: "Cheap Win" -> 0 (Ignore)
-    # Condition: Rank 1 AND Odds < 10.0
-    mask_cheap = mask_win & (df['proxy_odds'] < 10.0)
-    df.loc[mask_cheap, 'ana_relevance'] = 0
-    print(f"  - Cheap Wins (Odds<10) masked to 0: {mask_cheap.sum()} rows")
+    # Feature Importance
+    print_feature_importance(model_h, feats_honmei)
     
-    # Strategy 2: "High Dividend Win" -> Boost Relevance
-    # Condition: Rank 1 AND Odds >= 10.0
-    # Relevance = Odds (Direct usage)
-    mask_high = mask_win & (df['proxy_odds'] >= 10.0)
-    df.loc[mask_high, 'ana_relevance'] = df.loc[mask_high, 'proxy_odds']
-    print(f"  - High Dividend Wins (Odds>=10) set to Odds: {mask_high.sum()} rows")
+    # モデル保存
+    if args.save_model:
+        model_h.save_model(MODEL_HONMEI)
+        print(f"✅ Saved updated model to: {MODEL_HONMEI}")
     
-    # Cast to int for LightGBM Ranking and Clip to valid range (0-30)
-    # LightGBM default label range is limited.
-    df['ana_relevance'] = df['ana_relevance'].astype(int).clip(upper=30)
-    
-    # 3. Define Weighting
-    # Strategy: Weight = Odds (Direct or Squared)
-    # User requested: "tansho_odds itself or squared"
-    # We use Odds directly for now.
-    df['weight_ana'] = 1.0 # Default
-    
-    # Apply to all Rank 1 rows? Or just High Dividend?
-    # User said "weight = tansho_odds". usually applied to the positive samples.
-    # We will apply weight=Odds to ALL Valid Wins (High Dividend only, since Low are 0 relevance)
-    # Actually, if Relevance is 0, Weight doesn't matter much for ranking (it pushes it down? No, it just ignores it).
-    # But for "High Dividend", we want to emphasize it.
-    df.loc[mask_high, 'weight_ana'] = df.loc[mask_high, 'proxy_odds']
-    
-    # Also boost weights for Rank 2, 3? Maybe not. Keep 1.0.
-    
-    feats_ana = get_features(df, mode='ana')
-    print(f"  - Ana Features: {len(feats_ana)} features (Odds excluded)")
-    
-    model_a, test_a = train_lgb_ranker(df, feats_ana, MODEL_ANA, weight_col='weight_ana', label_col='ana_relevance')
-    evaluate_trifecta(model_a, test_a, feats_ana, "Ana")
-
-    print("\nAll Done.")
+    print("\nAll Training and Evaluation Completed.")
 
 if __name__ == "__main__":
     main()
+

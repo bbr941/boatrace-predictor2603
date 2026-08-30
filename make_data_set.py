@@ -124,13 +124,16 @@ def load_base_data(conn, limit=None, start_date=None):
         AND cr.course_number = COALESCE(bi.exhibition_entry_course, re.boat_number)
     
     {where_clause}
-    ORDER BY r.race_date DESC, r.race_number DESC, re.boat_number
     """
     
     if limit:
         query += f" LIMIT {limit}"
         
-    return pd.read_sql(query, conn)
+    df = pd.read_sql(query, conn)
+    if not df.empty and 'race_date' in df.columns:
+        df = df.sort_values(['race_date', 'race_number', 'boat_number'], ascending=[False, False, True]).reset_index(drop=True)
+    return df
+
 
 
 def load_st_stability(conn, limit=None):
@@ -153,38 +156,44 @@ def load_st_stability(conn, limit=None):
     return st_stats
 
 
-def load_synthetic_odds(conn, race_ids):
+def load_synthetic_odds(conn, race_ids=None, start_date=None):
     """
-    odds_dataから三連単オッズを使って各艇の「勝率(支持率)」を逆算する
+    odds_dataから三連単オッズを使って各艇の「勝率(支持率)」を逆算する (高速単一パスクエリ)
     """
-    print("Calculating Synthetic Odds...")
-    if not race_ids:
+    print("Calculating Synthetic Odds (Fast Single-Pass)...")
+    
+    if start_date:
+        query = f"""
+        SELECT o.race_id, o.combination, o.odds_1min
+        FROM odds_data o
+        INNER JOIN races r ON o.race_id = r.race_id
+        WHERE r.race_date >= '{start_date}' AND o.odds_1min > 0
+        """
+    elif race_ids:
+        # race_idsが渡された場合、一時テーブルまたはIN句
+        if len(race_ids) > 2000:
+            query = "SELECT race_id, combination, odds_1min FROM odds_data WHERE odds_1min > 0"
+        else:
+            ids_str = "'" + "','".join(race_ids) + "'"
+            query = f"SELECT race_id, combination, odds_1min FROM odds_data WHERE race_id IN ({ids_str}) AND odds_1min > 0"
+    else:
+        query = "SELECT race_id, combination, odds_1min FROM odds_data WHERE odds_1min > 0"
+        
+    try:
+        df_odds = pd.read_sql(query, conn)
+        if df_odds.empty:
+            return None
+        df_odds['odds_1min'] = pd.to_numeric(df_odds['odds_1min'], errors='coerce')
+        df_odds = df_odds[df_odds['odds_1min'] > 0]
+        df_odds['first_boat'] = df_odds['combination'].astype(str).str[0].astype(int)
+        df_odds['prob'] = 1.0 / df_odds['odds_1min']
+        syn = df_odds.groupby(['race_id', 'first_boat'])['prob'].sum().reset_index()
+        syn.columns = ['race_id', 'boat_number', 'syn_win_rate']
+        return syn
+    except Exception as e:
+        print(f"  Warning: Synthetic odds calculation error: {e}")
         return None
 
-
-    # 大量レコードに対応するためチャンク分割クエリ
-    chunk_size = 1000
-    syn_list = []
-    for i in range(0, len(race_ids), chunk_size):
-        chunk = race_ids[i:i + chunk_size]
-        ids_str = "'" + "','".join(chunk) + "'"
-        query = f"SELECT race_id, combination, odds_1min FROM odds_data WHERE race_id IN ({ids_str})"
-        try:
-            df_odds = pd.read_sql(query, conn)
-            if not df_odds.empty:
-                df_odds['odds_1min'] = pd.to_numeric(df_odds['odds_1min'], errors='coerce')
-                df_odds['first_boat'] = df_odds['combination'].astype(str).str[0].astype(int)
-                df_odds = df_odds[df_odds['odds_1min'] > 0]
-                df_odds['prob'] = 1.0 / df_odds['odds_1min']
-                syn = df_odds.groupby(['race_id', 'first_boat'])['prob'].sum().reset_index()
-                syn.columns = ['race_id', 'boat_number', 'syn_win_rate']
-                syn_list.append(syn)
-        except Exception:
-            pass
-
-    if syn_list:
-        return pd.concat(syn_list, ignore_index=True)
-    return None
 
 def process_wind_data(df):
     print("Processing Wind Vectors...")
@@ -404,8 +413,8 @@ def main():
     df['st_std_dev'] = df['st_std_dev'].fillna(0.05)
     
     # 3. オッズの結合 (合成オッズ)
-    unique_race_ids = df['race_id'].unique().tolist()
-    syn_odds = load_synthetic_odds(conn, unique_race_ids)
+    syn_odds = load_synthetic_odds(conn, start_date=args.start_date)
+
     
     if syn_odds is not None:
         df = pd.merge(df, syn_odds, on=['race_id', 'boat_number'], how='left')

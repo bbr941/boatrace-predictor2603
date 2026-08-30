@@ -580,8 +580,11 @@ class FeatureEngineer:
             return 3.5
             
         df['series_avg_rank'] = df['prior_results'].apply(parse_prior)
-        df['makuri_rate'] = df['makuri_count'] / df['course_run_count'].replace(0, 1)
-        df['nige_rate'] = df['nige_count'] / df['course_run_count'].replace(0, 1)
+        denom = df['course_run_count'].replace(0, 1)
+        df['makuri_rate'] = df['makuri_count'] / denom
+        df['nige_rate'] = df['nige_count'] / denom
+        df['sashi_rate'] = df.get('sashi_count', 0.0) / denom
+        df['makurizashi_rate'] = df.get('makurizashi_count', 0.0) / denom
 
         # Advanced Features
         df = add_advanced_features(df)
@@ -601,17 +604,40 @@ class FeatureEngineer:
         df['wall_strength'] = df['course_quinella_rate'].shift(1).fillna(0)
         df['follow_potential'] = df['makuri_rate'].shift(1).fillna(0) * df['course_quinella_rate']
         
+        min_t = df['exhibition_time'].min()
         mean_t = df['exhibition_time'].mean()
         std_t = df['exhibition_time'].std()
         if std_t == 0 or np.isnan(std_t): std_t = 1.0
         df['tenji_z_score'] = (mean_t - df['exhibition_time']) / std_t
         df['linear_rank'] = df['exhibition_time'].rank(method='min', ascending=True)
         df['is_linear_leader'] = (df['linear_rank'] == 1).astype(int)
+
+        # 新規代替モメンタム & レース内展示偏差
+        df['ex_diff_from_race_min'] = (df['exhibition_time'] - min_t).fillna(0.0)
+        df['ex_diff_from_race_mean'] = (df['exhibition_time'] - mean_t).fillna(0.0)
+        df['ex_rank_in_race'] = df['linear_rank']
+        df['ex_momentum_diff'] = 0.0
+        df['ex_momentum_deviation'] = 0.0
         
         if 'weight_x' in df.columns: df['weight'] = df['weight_x']
         if 'weight' not in df.columns: df['weight'] = 52.0
         df['weight_diff'] = df['weight'] - df['weight'].mean()
         df['high_wind_alert'] = (df['wind_speed'] >= 5).astype(int)
+
+        # 新規環境クロス (風速・波高)
+        df['is_strong_wind'] = (df['wind_speed'] >= 4.0).astype(float)
+        df['is_gale_wind'] = (df['wind_speed'] >= 6.0).astype(float)
+        df['wind_makuri_cross'] = df['wind_speed'] * df['makuri_rate']
+        df['strong_wind_makuri'] = df['is_strong_wind'] * df['makuri_rate']
+        df['wind_makurizashi_cross'] = df['wind_speed'] * df['makurizashi_rate']
+        df['strong_wind_outer_adv'] = df['is_strong_wind'] * (df['boat_number'] >= 3).astype(float)
+        df['wind_nige_vulnerability'] = df['wind_speed'] * (1.0 - df['nige_rate']) * (df['boat_number'] == 1).astype(float)
+
+        df['wave_weight_prod'] = df['wave_height'] * df['weight']
+        df['wave_weight_ratio'] = df['wave_height'] / np.maximum(df['weight'], 40.0)
+        df['is_high_wave'] = (df['wave_height'] >= 4.0).astype(float)
+        df['high_wave_heavy_penalty'] = df['is_high_wave'] * np.maximum(0.0, df['weight'] - 52.0)
+        df['high_wave_inner_risk'] = df['is_high_wave'] * (df['boat_number'] == 1).astype(float)
         
         df['nat_win_rate'] = pd.to_numeric(df['nat_win_rate'], errors='coerce').fillna(0.0)
         df['local_win_rate'] = pd.to_numeric(df['local_win_rate'], errors='coerce').fillna(0.0)
@@ -643,6 +669,7 @@ class FeatureEngineer:
         for col in df.columns:
             if col not in ['race_id', 'race_date', 'venue_name', 'prior_results', 'wind_direction', 'branch', 'class', 'racer_class', 'venue_code_y']:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
+
 
         return df
 
