@@ -1,20 +1,44 @@
+import os
 import sqlite3
 import pandas as pd
 import numpy as np
+import argparse
 import re
 
-# データベースパス (適宜変更してください)
-DB_PATH = r'D:\BOAT2504_Base_line\BOAT2504_DB\boatrace.db' 
+# データベースパス (ローカルDBの存在確認とフォールバック)
+LOCAL_DB_CANDIDATES = [
+    r'D:\BOAT2504_Base_line\BOAT2504_DB\boatrace.db',
+    'boatrace.db'
+]
+
+def get_db_path():
+    for p in LOCAL_DB_CANDIDATES:
+        if os.path.exists(p):
+            return p
+    return 'boatrace.db'
+
+DB_PATH = get_db_path()
 
 def get_connection():
-    return sqlite3.connect(DB_PATH)
+    norm_path = os.path.abspath(DB_PATH).replace('\\', '/')
+    try:
+        return sqlite3.connect(f"file:///{norm_path}?mode=ro", uri=True)
+    except Exception:
+        return sqlite3.connect(DB_PATH)
 
-def load_base_data(conn, limit=None):
+def load_base_data(conn, limit=None, start_date=None):
     """
     基本データと統計データを結合して取得する
     limit: テスト用に取得件数を制限する場合に指定
+    start_date: 開始日付 (例: '2024-01-01')
     """
-    query = """
+    where_clause = ""
+    if start_date:
+        where_clause = f"WHERE r.race_date >= '{start_date}' AND r.is_cancelled = 0"
+    else:
+        where_clause = "WHERE r.is_cancelled = 0"
+
+    query = f"""
     SELECT
         -- 識別子
         re.race_id,
@@ -24,13 +48,13 @@ def load_base_data(conn, limit=None):
         r.venue_code,
         
         -- 直前情報 & 進入予想
-        -- 展示進入がない場合は枠番を使用するCOALESCE処理
         bi.exhibition_time,
         bi.exhibition_start_timing,
         COALESCE(bi.exhibition_entry_course, re.boat_number) as pred_course,
         
         -- 選手能力 (絶対評価)
         re.nat_win_rate,
+        re.nat_quinella_rate,
         re.motor_rate,
         re.boat_rate,
         re.prior_results,
@@ -49,15 +73,18 @@ def load_base_data(conn, limit=None):
         rcs.AvgStartTiming as course_avg_st,
         
         -- 決まり手実績 (Racer_CourseWinTech)
-        -- ※NULLの場合は0埋め
+        COALESCE(wt.RacesRun, 0) as wintech_races_run,
+        COALESCE(wt.Wins, 0) as wintech_wins,
         COALESCE(wt.Nige, 0) as nige_count,
         COALESCE(wt.Makuri, 0) as makuri_count,
+        COALESCE(wt.Makurizashi, 0) as makurizashi_count,
         COALESCE(wt.Sashi, 0) as sashi_count,
         
         -- 会場・環境情報
         r.wind_speed,
         r.wind_direction,
         r.wave_height,
+        r.weather,
         v.venue_name,
         
         -- 会場別成績 (Racer_VenueStats)
@@ -81,7 +108,7 @@ def load_base_data(conn, limit=None):
         ON re.racer_id = rcs.RacerID 
         AND rcs.Course = COALESCE(bi.exhibition_entry_course, re.boat_number)
         
-    -- 決まり手の結合
+    -- 決まり手の結合 (まくり差し等を含む)
     LEFT JOIN Racer_CourseWinTech wt 
         ON re.racer_id = wt.RacerID 
         AND wt.Course = COALESCE(bi.exhibition_entry_course, re.boat_number)
@@ -96,7 +123,8 @@ def load_base_data(conn, limit=None):
         ON r.venue_code = cr.venue_code
         AND cr.course_number = COALESCE(bi.exhibition_entry_course, re.boat_number)
     
-    ORDER BY re.race_id DESC, re.boat_number
+    {where_clause}
+    ORDER BY r.race_date DESC, r.race_number DESC, re.boat_number
     """
     
     if limit:
@@ -104,13 +132,13 @@ def load_base_data(conn, limit=None):
         
     return pd.read_sql(query, conn)
 
+
 def load_st_stability(conn, limit=None):
     """
     resultsテーブルから直近のST標準偏差を計算する
     """
     print("Calculating ST Standard Deviation from results...")
-    # 全期間だと重いので、直近6ヶ月などに絞るのが一般的ですが、今回は全件で例示
-    query = "SELECT racer_id, start_timing FROM results"
+    query = "SELECT racer_id, start_timing FROM results WHERE start_timing IS NOT NULL"
     if limit:
         query += f" LIMIT {limit}"
     df_res = pd.read_sql(query, conn)
@@ -121,55 +149,42 @@ def load_st_stability(conn, limit=None):
     # 計算 (選手ごとのST標準偏差)
     st_stats = df_res.groupby('racer_id')['start_timing'].std().reset_index()
     st_stats.columns = ['racer_id', 'st_std_dev']
-    
-    # NaN(1走のみ等)は平均的な値(0.05程度)で埋める
     st_stats['st_std_dev'] = st_stats['st_std_dev'].fillna(0.05)
-    
     return st_stats
+
 
 def load_synthetic_odds(conn, race_ids):
     """
     odds_dataから三連単オッズを使って各艇の「勝率(支持率)」を逆算する
-    odds_data table uses 'combination' (e.g. '123' or '1-2-3') instead of first_boat.
     """
     print("Calculating Synthetic Odds...")
-    # 対象レースのみ取得
-    if len(race_ids) > 10000:
-        query = "SELECT race_id, combination, odds_1min FROM odds_data"
-    else:
-        ids_str = "'" + "','".join(race_ids) + "'"
-        query = f"""
-        SELECT race_id, combination, odds_1min 
-        FROM odds_data 
-        WHERE race_id IN ({ids_str})
-        """
-    try:
-        df_odds = pd.read_sql(query, conn)
-        if len(race_ids) > 10000:
-            df_odds = df_odds[df_odds['race_id'].isin(race_ids)]
-    except:
-        return None # オッズデータがない場合
+    if not race_ids:
+        return None
 
-    # Ensure numeric
-    df_odds['odds_1min'] = pd.to_numeric(df_odds['odds_1min'], errors='coerce')
-    
-    # Parse 'first_boat' from 'combination'
-    # Combination format: '123' or '1-2-3'. Assume 1st char is the first boat.
-    # Note: If '10' exists (not in boat race usually, max 6), logic differs.
-    # But boat race is 1-6. So str[0] is safe.
-    df_odds['first_boat'] = df_odds['combination'].astype(str).str[0].astype(int)
 
-    # オッズの逆数（支持率）を計算
-    # 0.0や欠損を除く
-    df_odds = df_odds[df_odds['odds_1min'] > 0].copy()
-    df_odds['prob'] = 1 / df_odds['odds_1min']
-    
-    # 各レース・各艇ごとの「1着になる確率の合計」を出す
-    syn_odds = df_odds.groupby(['race_id', 'first_boat'])['prob'].sum().reset_index()
-    syn_odds.columns = ['race_id', 'boat_number', 'syn_win_rate']
-    
-    # 正規化（合計が1になるわけではない控除率の影響があるため、レースごとにスケーリングしても良いが、ここではそのままで）
-    return syn_odds
+    # 大量レコードに対応するためチャンク分割クエリ
+    chunk_size = 1000
+    syn_list = []
+    for i in range(0, len(race_ids), chunk_size):
+        chunk = race_ids[i:i + chunk_size]
+        ids_str = "'" + "','".join(chunk) + "'"
+        query = f"SELECT race_id, combination, odds_1min FROM odds_data WHERE race_id IN ({ids_str})"
+        try:
+            df_odds = pd.read_sql(query, conn)
+            if not df_odds.empty:
+                df_odds['odds_1min'] = pd.to_numeric(df_odds['odds_1min'], errors='coerce')
+                df_odds['first_boat'] = df_odds['combination'].astype(str).str[0].astype(int)
+                df_odds = df_odds[df_odds['odds_1min'] > 0]
+                df_odds['prob'] = 1.0 / df_odds['odds_1min']
+                syn = df_odds.groupby(['race_id', 'first_boat'])['prob'].sum().reset_index()
+                syn.columns = ['race_id', 'boat_number', 'syn_win_rate']
+                syn_list.append(syn)
+        except Exception:
+            pass
+
+    if syn_list:
+        return pd.concat(syn_list, ignore_index=True)
+    return None
 
 def process_wind_data(df):
     print("Processing Wind Vectors...")
@@ -242,150 +257,189 @@ def process_wind_data(df):
     return df
 
 def process_features(df):
-    print("Processing Features...")
+    print("Processing Features (including Cross Features & Momentum)...")
     
+    # 欠損補正・数値型変換
+    df['venue_code'] = pd.to_numeric(df['venue_code'], errors='coerce').fillna(1).astype(int)
+    df['wind_speed'] = pd.to_numeric(df['wind_speed'], errors='coerce').fillna(0.0)
+    df['wave_height'] = pd.to_numeric(df['wave_height'], errors='coerce').fillna(0.0)
+    df['weight'] = pd.to_numeric(df['weight'], errors='coerce').fillna(52.0)
+    df['nat_win_rate'] = pd.to_numeric(df['nat_win_rate'], errors='coerce').fillna(0.0)
+    df['nat_quinella_rate'] = pd.to_numeric(df.get('nat_quinella_rate', 0.0), errors='coerce').fillna(0.0)
+    df['local_win_rate'] = pd.to_numeric(df['local_win_rate'], errors='coerce').fillna(0.0)
+    df['motor_rate'] = pd.to_numeric(df['motor_rate'], errors='coerce').fillna(30.0)
+    df['boat_rate'] = pd.to_numeric(df['boat_rate'], errors='coerce').fillna(30.0)
+    
+    rank_map = {'A1': 4, 'A2': 3, 'B1': 2, 'B2': 1}
+    df['racer_rank_num'] = df['racer_rank'].map(rank_map).fillna(2).astype(int)
+
+    # 展示タイム欠損補完 (会場×艇番の中央値)
+    df['exhibition_time'] = pd.to_numeric(df['exhibition_time'], errors='coerce')
+    df['exhibition_time'] = df.groupby(['venue_code', 'boat_number'])['exhibition_time'].transform(lambda x: x.fillna(x.median())).fillna(6.80)
+
+    # 決まり手出現率 (該当コースでの実績比率)
+    denom = np.maximum(pd.to_numeric(df['course_run_count'], errors='coerce').fillna(0), 1.0)
+    df['makuri_count'] = pd.to_numeric(df.get('makuri_count', 0), errors='coerce').fillna(0)
+    df['makurizashi_count'] = pd.to_numeric(df.get('makurizashi_count', 0), errors='coerce').fillna(0)
+    df['sashi_count'] = pd.to_numeric(df.get('sashi_count', 0), errors='coerce').fillna(0)
+    df['nige_count'] = pd.to_numeric(df.get('nige_count', 0), errors='coerce').fillna(0)
+
+    df['makuri_rate'] = df['makuri_count'] / denom
+    df['makurizashi_rate'] = df['makurizashi_count'] / denom
+    df['sashi_rate'] = df['sashi_count'] / denom
+    df['nige_rate'] = df['nige_count'] / denom
+
     # --- ヘルパー関数: 今節平均着順のパース ---
     def parse_prior_results(res_str):
         if not isinstance(res_str, str): return np.nan
-        # 数字のみ抽出
         ranks = [int(c) for c in res_str if c.isdigit()]
-        # F/L等の事故は文字として残るが、ここでは簡略化のため数字のみの平均
-        # 厳密にするなら: re.findall(r'[FL]', res_str) で事故数をカウントし、6点(最下位)として加算など
         if not ranks: return np.nan
         return np.mean(ranks)
 
     # 1. 今節平均着順 (Series Avg Rank)
-    df['series_avg_rank'] = df['prior_results'].apply(parse_prior_results)
-    # 欠損は3.5(中間)で埋める
-    df['series_avg_rank'] = df['series_avg_rank'].fillna(3.5)
+    df['series_avg_rank'] = df['prior_results'].apply(parse_prior_results).fillna(3.5)
 
-    # 2. まくり率・逃げ率の正規化 (回数 -> 率)
-    # 分母が0の場合は0にする
-    df['makuri_rate'] = df['makuri_count'] / df['course_run_count'].replace(0, 1)
-    df['nige_rate'] = df['nige_count'] / df['course_run_count'].replace(0, 1)
-
-    # --- 相対・グループ特徴量の計算 ---
-    # レースIDでグルーピングして計算する
-    
     # データをレースID, 予測コース(or枠番)順にソートしておく
     df = df.sort_values(['race_id', 'pred_course'])
-    
+
     # A. ST関連 (Inner Gap, Slit Formation)
-    # 内隣のSTを取得 (shift 1)
     df['inner_st'] = df.groupby('race_id')['exhibition_start_timing'].shift(1)
+    df['inner_st_gap'] = (df['exhibition_start_timing'] - df['inner_st']).fillna(0.0)
     
-    # ① 対内隣ST差 (マイナスが良い)
-    # 1コースは内隣がいないので0とする
-    df['inner_st_gap'] = df['exhibition_start_timing'] - df['inner_st']
-    df['inner_st_gap'] = df['inner_st_gap'].fillna(0)
-    
-    # 外隣のST (shift -1)
     df['outer_st'] = df.groupby('race_id')['exhibition_start_timing'].shift(-1)
-    
-    # ② スリット隊形係数 (自分が凹んで両隣が出ているか)
-    # (自ST) - (内と外の平均)
     avg_neighbor_st = (df['inner_st'].fillna(df['exhibition_start_timing']) + 
                        df['outer_st'].fillna(df['exhibition_start_timing'])) / 2
-    df['slit_formation'] = df['exhibition_start_timing'] - avg_neighbor_st
+    df['slit_formation'] = (df['exhibition_start_timing'] - avg_neighbor_st).fillna(0.0)
 
-    # B. 1マーク攻防
-    
-    # ④ イン逃げ阻止力 (Anti-Nige)
-    # 自分がまくり屋(makuri_rate)で、かつ1コースが逃げ失敗しやすいか？
-    # まず1コースのデータを全艇に持たせる
+    # B. 1マーク攻防 & 壁
     df['course1_nige_rate'] = df.groupby('race_id')['nige_rate'].transform('first')
-    # 1コース以外が持つ特徴量
-    df['anti_nige_potential'] = df['makuri_rate'] * (1 - df['course1_nige_rate'])
+    df['anti_nige_potential'] = (df['makuri_rate'] * (1.0 - df['course1_nige_rate'])).fillna(0.0)
     
-    # ⑤ 壁信頼度 (Wall Strength)
-    # 2コースの艇の連対率を、そのレースの全艇に「壁強度」として配る(あるいは2コースの選手自身のFeatureとする)
-    # ここでは「自艇の一つ内側が壁として機能するか」を計算します
     df['inner_quinella_rate'] = df.groupby('race_id')['course_quinella_rate'].shift(1)
-    df['wall_strength'] = df['inner_quinella_rate'] # シンプルに内側の強さ
+    df['wall_strength'] = df['inner_quinella_rate'].fillna(0.0)
     
-    # ⑥ 追随ポテンシャル (Follow Potential)
-    # 内隣がまくり屋なら、自分にチャンス
     df['inner_makuri_rate'] = df.groupby('race_id')['makuri_rate'].shift(1)
-    df['follow_potential'] = df['inner_makuri_rate'] * df['course_quinella_rate']
-    
-    # C. 機力評価
-    
-    # ⑬ 展示タイム偏差値 (Tenji Z-Score)
-    # レースごとの平均と標準偏差
+    df['follow_potential'] = (df['inner_makuri_rate'].fillna(0.0) * df['course_quinella_rate'].fillna(0.0))
+
+    # C. 機力評価 & 代替モメンタム (Exhibition Momentum)
+    # ① レース内相対展示タイム
     gb_tenji = df.groupby('race_id')['exhibition_time']
-    df['tenji_mean'] = gb_tenji.transform('mean')
-    df['tenji_std'] = gb_tenji.transform('std')
-    # 偏差値化 (タイムは小さい方が良いので符号反転するか、 (平均 - 自分) / std とする)
-    df['tenji_z_score'] = (df['tenji_mean'] - df['exhibition_time']) / df['tenji_std']
-    df['tenji_z_score'] = df['tenji_z_score'].fillna(0) # stdが0(全員同じ)の場合など
+    race_min_ex = gb_tenji.transform('min')
+    race_mean_ex = gb_tenji.transform('mean')
+    race_std_ex = gb_tenji.transform('std')
 
-    # ⑭ 直線番長フラグ (Rank)
-    df['linear_rank'] = gb_tenji.rank(method='min', ascending=True) # タイム昇順のランク
-    df['is_linear_leader'] = (df['linear_rank'] == 1).astype(int)
+    df['ex_diff_from_race_min'] = (df['exhibition_time'] - race_min_ex).fillna(0.0)
+    df['ex_diff_from_race_mean'] = (df['exhibition_time'] - race_mean_ex).fillna(0.0)
+    df['tenji_z_score'] = ((race_mean_ex - df['exhibition_time']) / race_std_ex.replace(0, np.nan)).fillna(0.0)
+    df['ex_rank_in_race'] = gb_tenji.rank(method='min', ascending=True)
+    df['linear_rank'] = df['ex_rank_in_race']
+    df['is_linear_leader'] = (df['ex_rank_in_race'] == 1).astype(int)
 
-    # D. 環境・選手補正
+    # ② 節間（同一会場・同一選手）での展示タイムモメンタム
+    # 日付・レース番号順に並んでいる状態で shift
+    df = df.sort_values(['race_date', 'race_id', 'pred_course'])
+    df['prev_ex_in_series'] = df.groupby(['venue_code', 'racer_id'])['exhibition_time'].shift(1)
+    df['ex_momentum_diff'] = (df['exhibition_time'] - df['prev_ex_in_series']).fillna(0.0)
     
-    # ⑩ 体重ハンデ
-    # レース平均体重との差
+    series_exp_mean = df.groupby(['venue_code', 'racer_id'])['exhibition_time'].transform(lambda x: x.expanding().mean())
+    df['ex_momentum_deviation'] = (df['exhibition_time'] - series_exp_mean).fillna(0.0)
+
+    # D. 風速クロス (Wind Speed Cross)
+    df['is_strong_wind'] = (df['wind_speed'] >= 4.0).astype(float)
+    df['is_gale_wind'] = (df['wind_speed'] >= 6.0).astype(float)
+    df['wind_makuri_cross'] = df['wind_speed'] * df['makuri_rate']
+    df['strong_wind_makuri'] = df['is_strong_wind'] * df['makuri_rate']
+    df['wind_makurizashi_cross'] = df['wind_speed'] * df['makurizashi_rate']
+    df['strong_wind_outer_adv'] = df['is_strong_wind'] * (df['boat_number'] >= 3).astype(float)
+    df['wind_nige_vulnerability'] = df['wind_speed'] * (1.0 - df['nige_rate']) * (df['boat_number'] == 1).astype(float)
+    df['high_wind_alert'] = (df['wind_speed'] >= 5.0).astype(int)
+
+    # E. 波高クロス (Wave Height Cross)
+    df['wave_weight_prod'] = df['wave_height'] * df['weight']
+    df['wave_weight_ratio'] = df['wave_height'] / np.maximum(df['weight'], 40.0)
+    df['is_high_wave'] = (df['wave_height'] >= 4.0).astype(float)
+    df['high_wave_heavy_penalty'] = df['is_high_wave'] * np.maximum(0.0, df['weight'] - 52.0)
+    df['high_wave_inner_risk'] = df['is_high_wave'] * (df['boat_number'] == 1).astype(float)
+
+    # F. 環境・選手補正
     df['weight_diff'] = df['weight'] - df.groupby('race_id')['weight'].transform('mean')
-    
-    # ⑲ イン有利風向 (単純化: 風向データがテキストの場合、パースが必要)
-    # 例: "北西" などの場合、場ごとの地理データが必要ですが、
-    # ここでは「追い風フラグ」などはwind_directionの処理が複雑なため、
-    # 簡易的に「風速の影響」のみ実装します
-    df['high_wind_alert'] = (df['wind_speed'] >= 5).astype(int)
-    
-    # ⑳ 当地相性
-    df['local_perf_diff'] = df['local_win_rate'] - df['nat_win_rate']
-    df['local_perf_diff'] = df['local_perf_diff'].fillna(0)
+    df['local_perf_diff'] = (df['local_win_rate'] - df['nat_win_rate']).fillna(0.0)
+
+    # G. 風向ベクトル
+    df = process_wind_data(df)
 
     # 不要な一時カラムの削除
-    drop_cols = ['inner_st', 'outer_st', 'inner_quinella_rate', 'inner_makuri_rate', 
-                 'tenji_mean', 'tenji_std', 'course1_nige_rate']
+    drop_cols = ['inner_st', 'outer_st', 'inner_quinella_rate', 'inner_makuri_rate', 'course1_nige_rate', 'prev_ex_in_series']
     df = df.drop(columns=drop_cols, errors='ignore')
-    
-    # Wind processing
-    df = process_wind_data(df)
-    
+
     return df
 
 def main():
+    parser = argparse.ArgumentParser(description="Build Boatrace Dataset with Advanced Cross Features")
+    parser.add_argument('--limit', type=int, default=None, help="Limit number of rows from DB for quick testing")
+    parser.add_argument('--test', action='store_true', help="Run test mode with 6000 rows (1000 races)")
+    parser.add_argument('--start_date', type=str, default=None, help="Filter races starting from this date (e.g. 2024-01-01)")
+    parser.add_argument('--output', type=str, default='boatrace_dataset_labeled_v2.csv', help="Output CSV path")
+    
+    args = parser.parse_args()
+
+    limit_count = args.limit
+    if args.test and limit_count is None:
+        limit_count = 6000
+
     conn = get_connection()
     
     # 1. ベースデータのロード
-    print("Loading base data...")
-    # 1. ベースデータのロード
-    print("Loading base data... (ALL)")
-    df = load_base_data(conn, limit=None) # 全件取得
+    print(f"Loading base data... (limit={limit_count}, start_date={args.start_date})")
+    df = load_base_data(conn, limit=limit_count, start_date=args.start_date)
     
+    if df.empty:
+        print("❌ No data loaded.")
+        conn.close()
+        return df
+
     # 2. ST標準偏差の結合
-    st_stats = load_st_stability(conn, limit=None) # 全件取得
+    st_stats = load_st_stability(conn, limit=None)
     df = pd.merge(df, st_stats, on='racer_id', how='left')
+    df['st_std_dev'] = df['st_std_dev'].fillna(0.05)
     
-    # 3. オッズの結合 (オプション)
-    # 対象レースIDのリストを取得
+    # 3. オッズの結合 (合成オッズ)
     unique_race_ids = df['race_id'].unique().tolist()
     syn_odds = load_synthetic_odds(conn, unique_race_ids)
     
     if syn_odds is not None:
         df = pd.merge(df, syn_odds, on=['race_id', 'boat_number'], how='left')
-        df['syn_win_rate'] = df['syn_win_rate'].fillna(0)
+        df['syn_win_rate'] = df['syn_win_rate'].fillna(0.0)
     else:
         print("Odds data not found or skipped.")
-        df['syn_win_rate'] = 0
+        df['syn_win_rate'] = 0.0
     
-    # 4. 特徴量計算
+    # 4. 特徴量計算 (環境クロス・代替モメンタム含む)
     df_final = process_features(df)
     
-    # 5. 確認
-    print("Data creation complete.")
-    print(df_final[['race_id', 'boat_number', 'inner_st_gap', 'tenji_z_score', 'series_avg_rank']].head(12))
+    # 5. 確認 & 保存
+    print("\n" + "=" * 70)
+    print(f"  🎉 データセット作成完了: {len(df_final):,} 行 | {len(df_final.columns)} カラム")
+    print("=" * 70)
+    
+    sample_cols = [
+        'race_id', 'boat_number', 'wind_speed', 'wind_nige_vulnerability',
+        'wind_makuri_cross', 'wave_weight_prod', 'high_wave_heavy_penalty',
+        'ex_diff_from_race_min', 'ex_momentum_diff', 'series_avg_rank', 'rank'
+    ]
+    avail_sample_cols = [c for c in sample_cols if c in df_final.columns]
+    print(df_final[avail_sample_cols].head(6))
     
     # 保存
-    df_final.to_csv('boatrace_dataset_labeled_v2.csv', index=False)
+    out_dir = os.path.dirname(args.output)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    df_final.to_csv(args.output, index=False)
+    print(f"\nSaved dataset to: {args.output}")
+
     
     conn.close()
     return df_final
 
 if __name__ == "__main__":
-    df_dataset = main()
+    df_dataset = main()
