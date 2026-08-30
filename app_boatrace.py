@@ -548,10 +548,11 @@ def add_advanced_features(df):
     return df
 
 
-def fetch_series_momentum(venue_code: int, racer_ids: list, race_date: str = None) -> dict:
+def fetch_series_momentum(venue_code: int, racer_ids: list, race_date: str = None, current_times: dict = None) -> dict:
     """
     対象会場・今節（同一会場で過去7日以内〜当日）における出走選手の過去展示タイム履歴をDBから取得し、
     前走展示タイム差 (ex_momentum_diff) および 節間平均偏差 (ex_momentum_deviation) を算出する。
+    リアルタイムスクレイピング時（未確定・DB未保存データ）でも current_times とDB履歴を自動結合して計算。
     """
     momentum_dict = {rid: {'ex_momentum_diff': 0.0, 'ex_momentum_deviation': 0.0} for rid in racer_ids}
     if not racer_ids:
@@ -590,7 +591,6 @@ def fetch_series_momentum(venue_code: int, racer_ids: list, race_date: str = Non
             ORDER BY r.race_date ASC, r.race_number ASC
             """
 
-
             cursor.execute(query, params)
             rows = cursor.fetchall()
             conn.close()
@@ -604,19 +604,45 @@ def fetch_series_momentum(venue_code: int, racer_ids: list, race_date: str = Non
                 
             for r_id in racer_ids:
                 times = racer_times.get(r_id, [])
-                if len(times) >= 2:
-                    current_ex = times[-1]
-                    prev_ex = times[-2]
-                    exp_mean = np.mean(times)
-                    momentum_dict[r_id]['ex_momentum_diff'] = float(current_ex - prev_ex)
-                    momentum_dict[r_id]['ex_momentum_deviation'] = float(current_ex - exp_mean)
-                elif len(times) == 1:
-                    momentum_dict[r_id]['ex_momentum_diff'] = 0.0
-                    momentum_dict[r_id]['ex_momentum_deviation'] = 0.0
+                cur_ex = float(current_times.get(r_id, 0.0)) if current_times and pd.notna(current_times.get(r_id)) else 0.0
+                
+                if cur_ex > 0:
+                    if len(times) == 0:
+                        momentum_dict[r_id]['ex_momentum_diff'] = 0.0
+                        momentum_dict[r_id]['ex_momentum_deviation'] = 0.0
+                    elif len(times) >= 1 and abs(times[-1] - cur_ex) < 1e-4:
+                        # 過去データとして既にDBに含まれる場合
+                        if len(times) >= 2:
+                            current_ex_val = times[-1]
+                            prev_ex_val = times[-2]
+                            exp_mean = np.mean(times)
+                            momentum_dict[r_id]['ex_momentum_diff'] = float(current_ex_val - prev_ex_val)
+                            momentum_dict[r_id]['ex_momentum_deviation'] = float(current_ex_val - exp_mean)
+                        else:
+                            momentum_dict[r_id]['ex_momentum_diff'] = 0.0
+                            momentum_dict[r_id]['ex_momentum_deviation'] = 0.0
+                    else:
+                        # リアルタイム未保存レース（DBの過去走 + 今回スクレイピングした展示タイムを結合）
+                        prev_ex_val = times[-1]
+                        all_times = times + [cur_ex]
+                        exp_mean = np.mean(all_times)
+                        momentum_dict[r_id]['ex_momentum_diff'] = float(cur_ex - prev_ex_val)
+                        momentum_dict[r_id]['ex_momentum_deviation'] = float(cur_ex - exp_mean)
+                else:
+                    if len(times) >= 2:
+                        current_ex_val = times[-1]
+                        prev_ex_val = times[-2]
+                        exp_mean = np.mean(times)
+                        momentum_dict[r_id]['ex_momentum_diff'] = float(current_ex_val - prev_ex_val)
+                        momentum_dict[r_id]['ex_momentum_deviation'] = float(current_ex_val - exp_mean)
+                    else:
+                        momentum_dict[r_id]['ex_momentum_diff'] = 0.0
+                        momentum_dict[r_id]['ex_momentum_deviation'] = 0.0
     except Exception:
         pass
         
     return momentum_dict
+
 
 
 
@@ -738,10 +764,12 @@ class FeatureEngineer:
         # 節間展示タイムモメンタム（動的DBクエリ結果をマッピング）
         racer_ids_list = df['racer_id'].dropna().astype(int).tolist()
         v_code_val = int(df['venue_code_int'].iloc[0]) if 'venue_code_int' in df.columns and len(df) > 0 else 1
-        momentum_map = fetch_series_momentum(v_code_val, racer_ids_list, race_date)
+        current_times = dict(zip(df['racer_id'].astype(int), pd.to_numeric(df['exhibition_time'], errors='coerce'))) if 'exhibition_time' in df.columns else None
+        momentum_map = fetch_series_momentum(v_code_val, racer_ids_list, race_date, current_times=current_times)
         
-        df['ex_momentum_diff'] = df['racer_id'].map(lambda r: momentum_map.get(int(r), {}).get('ex_momentum_diff', 0.0)).fillna(0.0)
-        df['ex_momentum_deviation'] = df['racer_id'].map(lambda r: momentum_map.get(int(r), {}).get('ex_momentum_deviation', 0.0)).fillna(0.0)
+        df['ex_momentum_diff'] = df['racer_id'].map(lambda r: momentum_map.get(int(r), {}).get('ex_momentum_diff', 0.0) if pd.notna(r) else 0.0).fillna(0.0)
+        df['ex_momentum_deviation'] = df['racer_id'].map(lambda r: momentum_map.get(int(r), {}).get('ex_momentum_deviation', 0.0) if pd.notna(r) else 0.0).fillna(0.0)
+
         
         if 'weight_x' in df.columns: df['weight'] = df['weight_x']
         if 'weight' not in df.columns: df['weight'] = 52.0
