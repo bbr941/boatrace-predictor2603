@@ -535,8 +535,11 @@ def fetch_series_momentum(venue_code: int, racer_ids: list, race_date: str = Non
             sqlite_db = sp
             break
 
-    try:
-        if sqlite_db:
+    racer_times = {int(rid): [] for rid in racer_ids}
+    found_in_sqlite = False
+
+    if sqlite_db:
+        try:
             import sqlite3
             conn = sqlite3.connect(sqlite_db)
             cursor = conn.cursor()
@@ -555,7 +558,6 @@ def fetch_series_momentum(venue_code: int, racer_ids: list, race_date: str = Non
                 date_filter = "AND r.race_date >= date('now', '-7 days')"
                 params = [int(venue_code)] + [int(r) for r in racer_ids]
 
-
             query = f"""
             SELECT re.racer_id, bi.exhibition_time
             FROM before_info bi
@@ -572,51 +574,66 @@ def fetch_series_momentum(venue_code: int, racer_ids: list, race_date: str = Non
             rows = cursor.fetchall()
             conn.close()
             
-            racer_times = {}
-            for r_id, ex_time in rows:
-                r_id = int(r_id)
-                if r_id not in racer_times:
-                    racer_times[r_id] = []
-                racer_times[r_id].append(float(ex_time))
-                
-            for r_id in racer_ids:
-                times = racer_times.get(r_id, [])
-                cur_ex = float(current_times.get(r_id, 0.0)) if current_times and pd.notna(current_times.get(r_id)) else 0.0
-                
-                if cur_ex > 0:
-                    if len(times) == 0:
-                        momentum_dict[r_id]['ex_momentum_diff'] = 0.0
-                        momentum_dict[r_id]['ex_momentum_deviation'] = 0.0
-                    elif len(times) >= 1 and abs(times[-1] - cur_ex) < 1e-4:
-                        # 過去データとして既にDBに含まれる場合
-                        if len(times) >= 2:
-                            current_ex_val = times[-1]
-                            prev_ex_val = times[-2]
-                            exp_mean = np.mean(times)
-                            momentum_dict[r_id]['ex_momentum_diff'] = float(current_ex_val - prev_ex_val)
-                            momentum_dict[r_id]['ex_momentum_deviation'] = float(current_ex_val - exp_mean)
-                        else:
-                            momentum_dict[r_id]['ex_momentum_diff'] = 0.0
-                            momentum_dict[r_id]['ex_momentum_deviation'] = 0.0
-                    else:
-                        # リアルタイム未保存レース（DBの過去走 + 今回スクレイピングした展示タイムを結合）
-                        prev_ex_val = times[-1]
-                        all_times = times + [cur_ex]
-                        exp_mean = np.mean(all_times)
-                        momentum_dict[r_id]['ex_momentum_diff'] = float(cur_ex - prev_ex_val)
-                        momentum_dict[r_id]['ex_momentum_deviation'] = float(cur_ex - exp_mean)
+            if rows:
+                for r_id, ex_time in rows:
+                    r_id = int(r_id)
+                    if r_id in racer_times:
+                        racer_times[r_id].append(float(ex_time))
+                found_in_sqlite = True
+        except Exception as e:
+            logger.debug(f"fetch_series_momentum SQLite error: {e}")
+
+    # SQLiteで見つからないか0件の場合は Supabase (クラウド) にフォールバック
+    total_historical_runs = sum(len(v) for v in racer_times.values())
+    if not found_in_sqlite or total_historical_runs == 0:
+        try:
+            cloud_times_map = db_manager.get_cloud_series_momentum(venue_code, racer_ids, race_date=race_date)
+            if cloud_times_map:
+                for rid, t_list in cloud_times_map.items():
+                    if t_list:
+                        racer_times[int(rid)] = t_list
+        except Exception as e:
+            logger.debug(f"fetch_series_momentum Supabase fallback error: {e}")
+
+    for r_id in racer_ids:
+        r_id = int(r_id)
+        times = racer_times.get(r_id, [])
+        cur_ex = float(current_times.get(r_id, 0.0)) if current_times and pd.notna(current_times.get(r_id)) else 0.0
+        
+        if cur_ex > 0:
+            if len(times) == 0:
+                momentum_dict[r_id]['ex_momentum_diff'] = 0.0
+                momentum_dict[r_id]['ex_momentum_deviation'] = 0.0
+            elif len(times) >= 1 and abs(times[-1] - cur_ex) < 1e-4:
+                # 過去データとして既にDBに含まれる場合
+                if len(times) >= 2:
+                    current_ex_val = times[-1]
+                    prev_ex_val = times[-2]
+                    exp_mean = np.mean(times)
+                    momentum_dict[r_id]['ex_momentum_diff'] = float(current_ex_val - prev_ex_val)
+                    momentum_dict[r_id]['ex_momentum_deviation'] = float(current_ex_val - exp_mean)
                 else:
-                    if len(times) >= 2:
-                        current_ex_val = times[-1]
-                        prev_ex_val = times[-2]
-                        exp_mean = np.mean(times)
-                        momentum_dict[r_id]['ex_momentum_diff'] = float(current_ex_val - prev_ex_val)
-                        momentum_dict[r_id]['ex_momentum_deviation'] = float(current_ex_val - exp_mean)
-                    else:
-                        momentum_dict[r_id]['ex_momentum_diff'] = 0.0
-                        momentum_dict[r_id]['ex_momentum_deviation'] = 0.0
-    except Exception as e:
-        logger.debug(f"fetch_series_momentum error: {e}")
+                    momentum_dict[r_id]['ex_momentum_diff'] = 0.0
+                    momentum_dict[r_id]['ex_momentum_deviation'] = 0.0
+            else:
+                # リアルタイム未保存レース（DBの過去走 + 今回スクレイピングした展示タイムを結合）
+                prev_ex_val = times[-1]
+                all_times = times + [cur_ex]
+                exp_mean = np.mean(all_times)
+                momentum_dict[r_id]['ex_momentum_diff'] = float(cur_ex - prev_ex_val)
+                momentum_dict[r_id]['ex_momentum_deviation'] = float(cur_ex - exp_mean)
+        else:
+            # DB内の既存データからのみ算出
+            if len(times) >= 2:
+                current_ex_val = times[-1]
+                prev_ex_val = times[-2]
+                exp_mean = np.mean(times)
+                momentum_dict[r_id]['ex_momentum_diff'] = float(current_ex_val - prev_ex_val)
+                momentum_dict[r_id]['ex_momentum_deviation'] = float(current_ex_val - exp_mean)
+            else:
+                momentum_dict[r_id]['ex_momentum_diff'] = 0.0
+                momentum_dict[r_id]['ex_momentum_deviation'] = 0.0
+
         
     return momentum_dict
 
@@ -1641,11 +1658,12 @@ def run_worker_loop(
     else:
         logger.warning("⚠️ Discord Webhook: 未設定 (ドライラン表示のみ行います)")
         
-    # データベースの初期化 & マイグレーション確認
+    # データベースの初期化 & マイグレーション確認 & 展示タイム同期
     try:
         db_manager.init_database()
+        db_manager.sync_recent_exhibitions(days=10)
     except Exception as e:
-        logger.error(f"データベース初期化エラー: {e}")
+        logger.error(f"データベース初期化 / 展示同期エラー: {e}")
         
     # 起動時に即座に当日のスケジュールを登録 & 過去レース結果を精算
     register_daily_schedules(
@@ -1659,7 +1677,7 @@ def run_worker_loop(
     except Exception as e:
         logger.warning(f"起動時レース結果精算例外: {e}")
     
-    # 毎朝 08:00 に翌日/当日の全場スケジュールを自動リフレッシュ登録
+    # 毎朝 08:00 に翌日/当日の全場スケジュールを自動リフレッシュ登録 & 展示タイム同期
     schedule.every().day.at("08:00").do(
         register_daily_schedules,
         bankroll=bankroll,
@@ -1667,6 +1685,10 @@ def run_worker_loop(
         webhook_url=webhook_url,
         dry_run=dry_run
     )
+    schedule.every().day.at("08:00").do(
+        db_manager.sync_recent_exhibitions,
+        days=10
+    ).tag('exhibition_sync')
     
     # 10分ごとに未確定レースの結果を取得・的中判定・収支更新
     schedule.every(10).minutes.do(settle_race_results).tag('settlement')
@@ -1689,6 +1711,7 @@ if __name__ == "__main__":
     parser.add_argument('--test', action='store_true', help="Run single race test evaluation immediately")
     parser.add_argument('--mock', action='store_true', help="Run mock evaluation without web requests (ideal for midnight/offline tests)")
     parser.add_argument('--settle', action='store_true', help="Run race result settlement & payout calculation for unresolved races")
+    parser.add_argument('--sync', action='store_true', help="Sync recent 10 days exhibition times to Supabase (recent_exhibitions)")
     parser.add_argument('--date', type=str, default='', help="Date for test in YYYYMMDD (default: today)")
     parser.add_argument('--venue', type=int, default=18, help="Venue code for test (1-24, default: 18/Tokuyama)")
     parser.add_argument('--race', type=int, default=10, help="Race number for test (1-12, default: 10)")
@@ -1710,7 +1733,13 @@ if __name__ == "__main__":
     if args.dry_run:
         webhook = ''
         
-    if args.settle:
+    if args.sync:
+        # 展示タイム同期モード
+        logger.info("🔄 直近10日分の展示タイムを Supabase へ同期します...")
+        synced = db_manager.sync_recent_exhibitions(days=10)
+        print(f"✅ 展示タイム同期完了: {synced} 件のレコードを Supabase (recent_exhibitions) へ同期しました。")
+    elif args.settle:
+
         # 結果精算・確定収支計算モード
         target_d = args.date if args.date else None
         logger.info(f"🏁 未確定レースの結果取得・確定収支計算を実行します (Date: {target_d or 'All'})...")

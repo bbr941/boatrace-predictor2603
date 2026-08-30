@@ -571,8 +571,11 @@ def fetch_series_momentum(venue_code: int, racer_ids: list, race_date: str = Non
             sqlite_db = sp
             break
 
-    try:
-        if sqlite_db:
+    racer_times = {int(rid): [] for rid in racer_ids}
+    found_in_sqlite = False
+
+    if sqlite_db:
+        try:
             import sqlite3
             conn = sqlite3.connect(sqlite_db)
             cursor = conn.cursor()
@@ -591,7 +594,6 @@ def fetch_series_momentum(venue_code: int, racer_ids: list, race_date: str = Non
                 date_filter = "AND r.race_date >= date('now', '-7 days')"
                 params = [int(venue_code)] + [int(r) for r in racer_ids]
 
-
             query = f"""
             SELECT re.racer_id, bi.exhibition_time
             FROM before_info bi
@@ -608,51 +610,66 @@ def fetch_series_momentum(venue_code: int, racer_ids: list, race_date: str = Non
             rows = cursor.fetchall()
             conn.close()
             
-            racer_times = {}
-            for r_id, ex_time in rows:
-                r_id = int(r_id)
-                if r_id not in racer_times:
-                    racer_times[r_id] = []
-                racer_times[r_id].append(float(ex_time))
-                
-            for r_id in racer_ids:
-                times = racer_times.get(r_id, [])
-                cur_ex = float(current_times.get(r_id, 0.0)) if current_times and pd.notna(current_times.get(r_id)) else 0.0
-                
-                if cur_ex > 0:
-                    if len(times) == 0:
-                        momentum_dict[r_id]['ex_momentum_diff'] = 0.0
-                        momentum_dict[r_id]['ex_momentum_deviation'] = 0.0
-                    elif len(times) >= 1 and abs(times[-1] - cur_ex) < 1e-4:
-                        # 過去データとして既にDBに含まれる場合
-                        if len(times) >= 2:
-                            current_ex_val = times[-1]
-                            prev_ex_val = times[-2]
-                            exp_mean = np.mean(times)
-                            momentum_dict[r_id]['ex_momentum_diff'] = float(current_ex_val - prev_ex_val)
-                            momentum_dict[r_id]['ex_momentum_deviation'] = float(current_ex_val - exp_mean)
-                        else:
-                            momentum_dict[r_id]['ex_momentum_diff'] = 0.0
-                            momentum_dict[r_id]['ex_momentum_deviation'] = 0.0
-                    else:
-                        # リアルタイム未保存レース（DBの過去走 + 今回スクレイピングした展示タイムを結合）
-                        prev_ex_val = times[-1]
-                        all_times = times + [cur_ex]
-                        exp_mean = np.mean(all_times)
-                        momentum_dict[r_id]['ex_momentum_diff'] = float(cur_ex - prev_ex_val)
-                        momentum_dict[r_id]['ex_momentum_deviation'] = float(cur_ex - exp_mean)
+            if rows:
+                for r_id, ex_time in rows:
+                    r_id = int(r_id)
+                    if r_id in racer_times:
+                        racer_times[r_id].append(float(ex_time))
+                found_in_sqlite = True
+        except Exception:
+            pass
+
+    # SQLiteで見つからないか0件の場合は Supabase (クラウド) にフォールバック
+    total_historical_runs = sum(len(v) for v in racer_times.values())
+    if not found_in_sqlite or total_historical_runs == 0:
+        try:
+            cloud_times_map = db_manager.get_cloud_series_momentum(venue_code, racer_ids, race_date=race_date)
+            if cloud_times_map:
+                for rid, t_list in cloud_times_map.items():
+                    if t_list:
+                        racer_times[int(rid)] = t_list
+        except Exception:
+            pass
+
+    for r_id in racer_ids:
+        r_id = int(r_id)
+        times = racer_times.get(r_id, [])
+        cur_ex = float(current_times.get(r_id, 0.0)) if current_times and pd.notna(current_times.get(r_id)) else 0.0
+        
+        if cur_ex > 0:
+            if len(times) == 0:
+                momentum_dict[r_id]['ex_momentum_diff'] = 0.0
+                momentum_dict[r_id]['ex_momentum_deviation'] = 0.0
+            elif len(times) >= 1 and abs(times[-1] - cur_ex) < 1e-4:
+                # 過去データとして既にDBに含まれる場合
+                if len(times) >= 2:
+                    current_ex_val = times[-1]
+                    prev_ex_val = times[-2]
+                    exp_mean = np.mean(times)
+                    momentum_dict[r_id]['ex_momentum_diff'] = float(current_ex_val - prev_ex_val)
+                    momentum_dict[r_id]['ex_momentum_deviation'] = float(current_ex_val - exp_mean)
                 else:
-                    if len(times) >= 2:
-                        current_ex_val = times[-1]
-                        prev_ex_val = times[-2]
-                        exp_mean = np.mean(times)
-                        momentum_dict[r_id]['ex_momentum_diff'] = float(current_ex_val - prev_ex_val)
-                        momentum_dict[r_id]['ex_momentum_deviation'] = float(current_ex_val - exp_mean)
-                    else:
-                        momentum_dict[r_id]['ex_momentum_diff'] = 0.0
-                        momentum_dict[r_id]['ex_momentum_deviation'] = 0.0
-    except Exception:
-        pass
+                    momentum_dict[r_id]['ex_momentum_diff'] = 0.0
+                    momentum_dict[r_id]['ex_momentum_deviation'] = 0.0
+            else:
+                # リアルタイム未保存レース（DBの過去走 + 今回スクレイピングした展示タイムを結合）
+                prev_ex_val = times[-1]
+                all_times = times + [cur_ex]
+                exp_mean = np.mean(all_times)
+                momentum_dict[r_id]['ex_momentum_diff'] = float(cur_ex - prev_ex_val)
+                momentum_dict[r_id]['ex_momentum_deviation'] = float(cur_ex - exp_mean)
+        else:
+            # DB内の既存データからのみ算出
+            if len(times) >= 2:
+                current_ex_val = times[-1]
+                prev_ex_val = times[-2]
+                exp_mean = np.mean(times)
+                momentum_dict[r_id]['ex_momentum_diff'] = float(current_ex_val - prev_ex_val)
+                momentum_dict[r_id]['ex_momentum_deviation'] = float(current_ex_val - exp_mean)
+            else:
+                momentum_dict[r_id]['ex_momentum_diff'] = 0.0
+                momentum_dict[r_id]['ex_momentum_deviation'] = 0.0
+
         
     return momentum_dict
 
