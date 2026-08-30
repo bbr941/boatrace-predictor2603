@@ -1,6 +1,7 @@
 """
 find_active_momentum.py
-現在時刻で展示情報が発表されているナイターレースから、開催2日目以降（モメンタム計算可能）の未確定レースを高速自動探索・ダンプするスクリプト
+現在時刻で展示情報が発表されているナイターレース（蒲郡・桐生・下関等）から、
+開催2日目以降（モメンタム計算可能）のライブレースを自動探索・ダンプするスクリプト
 """
 
 import os
@@ -18,38 +19,33 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from app_boatrace import BoatRaceScraper, VENUE_MAP
 from auto_trader import FeatureEngineer, fetch_series_momentum
 
-
-# 対象ナイター会場
+# 対象ナイター会場（本日注目の蒲郡を先頭に設定）
 NIGHTER_VENUES = [
-    (1, '桐生'),
     (7, '蒲郡'),
-    (12, '住之江'),
-    (15, '丸亀'),
+    (1, '桐生'),
     (19, '下関'),
     (20, '若松'),
+    (12, '住之江'),
+    (15, '丸亀'),
     (24, '大村'),
 ]
 
 def find_active_momentum_race():
-    today_str = datetime.date.today().strftime('%Y%m%d')
-    formatted_date = f"{today_str[:4]}-{today_str[4:6]}-{today_str[6:]}"
+    # 実行時の現在日付（JST）を動的取得
+    now_dt = datetime.datetime.now()
+    today_str = now_dt.strftime('%Y%m%d')
+    formatted_date = now_dt.strftime('%Y-%m-%d')
+    current_time_str = now_dt.strftime('%H:%M:%S')
     
-    print("=========================================================================")
-    print(f" 🔍 [LIVE SEARCH] 現在時刻でモメンタム取得可能な未確定レースの高速探索 ({formatted_date})")
-    print("=========================================================================")
-
-    # 選手名の静的マッピングをロード
-    name_map = {}
-    try:
-        r_params = pd.read_csv('app_data/static_racer_params.csv')
-        name_map = dict(zip(r_params['racer_id'].astype(int), r_params['racer_name']))
-    except Exception:
-        pass
+    print("=" * 85)
+    print(f" 🔍 [LIVE MOMENTUM SEARCH] 本日開催ライブレース自動探索")
+    print(f"    日時: {formatted_date} {current_time_str} | 日付パラメータ: date_str='{today_str}'")
+    print("=" * 85)
 
     db_path = 'boatrace.db'
 
-    # 現在時刻に合わせて夕方〜夜の直近レース順（R5, R6, R7, R8, R4, R9, R10, R11, R12, R3, R2, R1）でスマート探索
-    smart_race_order = [6, 7, 5, 8, 4, 9, 10, 11, 12, 3, 2, 1]
+    # 現在時刻に合わせて夕方〜夜の直近レース順（R7, R8, R6, R9, R5, R10, R11, R12, R4, R3, R2, R1）で探索
+    smart_race_order = [7, 8, 6, 9, 5, 10, 11, 12, 4, 3, 2, 1]
 
     for venue_code, venue_name in NIGHTER_VENUES:
         print(f"\n🏟️ 会場チェック: {venue_name} ({venue_code:02d}場)...")
@@ -58,6 +54,7 @@ def find_active_momentum_race():
             print(f"   ▶ {venue_name} 第{r_no}レース 確認中...", end=" ", flush=True)
             
             try:
+                # 動的日付パラメータ today_str でスクレイピング
                 df_scraped = BoatRaceScraper.get_race_data(today_str, venue_code, r_no)
             except Exception as e:
                 print(f"エラースキップ: {e}")
@@ -80,13 +77,10 @@ def find_active_momentum_race():
             res = BoatRaceScraper.get_race_result(today_str, venue_code, r_no)
             is_unconfirmed = (res is None)
 
-            status_tag = "🔥 直前情報発表済み（未確定/締切前）" if is_unconfirmed else "🏁 結果確定済み"
+            status_tag = "🔥 直前情報発表済み（未確定/締切前）" if is_unconfirmed else "🏁 結果確定済み（直近レース）"
             print(f"✅ 展示タイム取得！ [{', '.join([f'{t:.2f}' for t in valid_ex])}] ({status_tag})")
 
-            # 選手名の補完
-            df_scraped['racer_name'] = df_scraped['racer_id'].astype(int).map(name_map).fillna('選手')
-
-            # 特徴量エンジンの実行
+            # 特徴量エンジンの実行（本番パイプライン）
             df_feat = FeatureEngineer.process(df_scraped.copy(), venue_name=venue_name, race_date=formatted_date)
 
             # 6艇のうち 0.0 以外のモメンタム差分を持つ選手がいるか判定
@@ -95,7 +89,7 @@ def find_active_momentum_race():
 
             if non_zero_count > 0:
                 print(f"\n{'🎯'*25}")
-                print(f"🎉 モメンタム計算可能なアクティブレースを発見！ ({venue_name} 第{r_no}レース - {status_tag})")
+                print(f"🎉 モメンタム計算可能な本日レースを発見！ ({venue_name} 第{r_no}レース - {status_tag})")
                 print(f"{'🎯'*25}\n")
 
                 # DBから節間履歴を取得して詳細表示用データを準備
@@ -118,17 +112,17 @@ def find_active_momentum_race():
                 conn.close()
 
                 # 結果のダンプ出力
-                print(f"📍 レース情報: {formatted_date} | {venue_name} ({venue_code:02d}場) | 第{r_no}レース [{status_tag}]")
+                print(f"📍 レース情報: {formatted_date} {current_time_str} | {venue_name} ({venue_code:02d}場) | 第{r_no}レース [{status_tag}]")
                 print(f"🌤️ 気象情報: 風速 {df_scraped['wind_speed'].iloc[0]}m, 波高 {df_scraped['wave_height'].iloc[0]}cm")
-                print("\n📊 【モメンタム抽出結果一覧】")
+                print("\n📊 【本日ライブ・モメンタム抽出結果一覧】")
                 print("-" * 125)
-                print(f"{'艇':<2} | {'選手名':<10} | {'登番':<5} | {'当日展示':<8} | {'前走(DB)':<8} | {'節間平均':<6} | {'節間走数':<4} | {'ex_diff_min':<11} | {'ex_momentum_diff':<18} | {'ex_momentum_dev':<15}")
+                print(f"{'艇':<2} | {'選手名':<10} | {'登番':<5} | {'本日(Web)':<8} | {'前走(DB)':<8} | {'節間平均':<6} | {'節間走数':<4} | {'ex_diff_min':<11} | {'ex_momentum_diff':<18} | {'ex_momentum_dev':<15}")
                 print("-" * 125)
 
                 for idx, row in df_feat.iterrows():
                     b_num = int(row['boat_number'])
                     r_id = int(row['racer_id'])
-                    r_name = str(row['racer_name'])
+                    r_name = str(row['racer_name']) if pd.notna(row['racer_name']) and str(row['racer_name']) != '' else f"登番{r_id}"
                     cur_ex = float(row['exhibition_time'])
                     
                     r_hist = df_history[df_history['racer_id'] == r_id]
@@ -151,7 +145,7 @@ def find_active_momentum_race():
                     print(f"{b_num:<2} | {r_name:<10} | {r_id:<5} | {cur_ex:<8.2f} | {prev_ex_str:<8} | {mean_ex_str:<8} | {total_runs:<6} | {ex_diff_min:<11.3f} | {ex_mom_diff:<7.3f} {signal_icon:<14} | {ex_mom_dev:<15.3f}")
 
                 print("-" * 125)
-                print(f"\n✅ 診断: 6艇中 {non_zero_count} 艇で有効な節間モメンタムをリアルタイム算出しました。自動検索を終了します。\n")
+                print(f"\n✅ 診断: 6艇中 {non_zero_count} 艇で有効な節間モメンタムを本日ライブデータから算出しました。自動検索を終了します。\n")
                 return True
 
     print("\n⚠️ 現在展示情報が発表されているナイターレースで、モメンタム計算可能な対象は見つかりませんでした。")

@@ -383,7 +383,11 @@ class BoatRaceScraper:
                     continue
                 
                 racer_id = 9999
+                racer_name = ''
                 try: 
+                    a_tag = tb.select("td")[2].select_one("a")
+                    if a_tag:
+                        racer_name = a_tag.get_text(strip=True)
                     txt = tb.select("td")[2].select_one("div").get_text()
                     racer_id = int(re.search(r'(\d{4})', txt).group(1))
                 except Exception: pass
@@ -450,6 +454,7 @@ class BoatRaceScraper:
                     'race_id': f"{date_str}_{venue_code}_{race_no}",
                     'boat_number': bn,
                     'racer_id': racer_id,
+                    'racer_name': racer_name,
                     'motor_rate': motor,
                     'boat_rate': boat,
                     'exhibition_time': boat_before[bn]['ex_time'],
@@ -464,6 +469,7 @@ class BoatRaceScraper:
                     'nat_win_rate': nat_win_rate,
                     'local_win_rate': local_win_rate
                 }
+
                 rows.append(row)
         except Exception as e:
             st.error(f"出走表パースエラー: {e}")
