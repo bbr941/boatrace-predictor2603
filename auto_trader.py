@@ -1176,7 +1176,47 @@ def evaluate_race(
             'max_p1': max_p1
         }
         
-    logger.info(f"🎯 [{venue_name} {race_no}R] Gatekeeper 通過！ (P1 = {max_p1:.2%} ≧ {gatekeeper_th:.2%}) Extractor推論を実行します...")
+    logger.info(f"🎯 [{venue_name} {race_no}R] Gatekeeper 通過！ (P1 = {max_p1:.2%} ≧ {gatekeeper_th:.2%})")
+
+    # 5.5 Sniper Filter (決定木マイクロクラスタ: Node 8, 9, 10)
+    # 1号艇の motor_rate と当該レースの wave_height を抽出
+    b1_feat = df_feat[df_feat['boat_number'] == 1]
+    b1_motor_rate = float(b1_feat['motor_rate'].iloc[0]) if (len(b1_feat) > 0 and 'motor_rate' in b1_feat.columns and pd.notna(b1_feat['motor_rate'].iloc[0])) else 0.0
+    wave_height = float(df_feat['wave_height'].iloc[0]) if ('wave_height' in df_feat.columns and pd.notna(df_feat['wave_height'].iloc[0])) else 0.0
+
+    sniper_go = False
+    sniper_node = ""
+
+    if b1_motor_rate > 61.33:
+        sniper_go = True
+        sniper_node = "Node 10: 超抜モーター"
+    elif wave_height > 6.5:  # (b1_motor_rate <= 61.33)
+        sniper_go = True
+        sniper_node = "Node 9: 荒水面オッズ歪み"
+    elif b1_motor_rate > 30.09 and max_p1 > 0.81:  # (wave_height <= 6.5)
+        sniper_go = True
+        sniper_node = "Node 8: 主力鉄板"
+
+    if not sniper_go:
+        logger.info(f"🎯 [{venue_name} {race_no}R] Sniper Filter: 条件未達のため投資スキップ (P1={max_p1:.2%}, Motor={b1_motor_rate:.1f}%, Wave={wave_height:.1f}cm) -> 見送り (No Bet)")
+        try:
+            db_manager.save_race_prediction(
+                race_id=race_id, race_date=date_str, venue_code=venue_code,
+                venue_name=venue_name, race_no=race_no, deadline_time=deadline_str,
+                top_boat=top_boat, max_p1=max_p1, prob_gap=prob_gap, gatekeeper_passed=True,
+                cluster_id=cluster_id, cluster_name=cluster_name, status="sniper_skipped",
+                source="auto"
+            )
+        except Exception: pass
+        return {
+            'status': 'sniper_skipped',
+            'top_boat': top_boat,
+            'max_p1': max_p1,
+            'b1_motor_rate': b1_motor_rate,
+            'wave_height': wave_height
+        }
+
+    logger.info(f"🎯 [{venue_name} {race_no}R] Sniper Filter 通過 [{sniper_node}] (P1={max_p1:.2%}, Motor={b1_motor_rate:.1f}%, Wave={wave_height:.1f}cm)! Extractor推論を実行します...")
     
     # 6. Extractor 推論 (Residual)
     model_r = lgb.Booster(model_file=MODEL_RESIDUAL_PATH)
