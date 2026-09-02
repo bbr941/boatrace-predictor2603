@@ -1246,6 +1246,19 @@ def export_radar_state(
             candidate_hit.sort(key=lambda x: (x['is_recommended'], x['prob']), reverse=True)
             odds_hit_focused = candidate_hit[:15]
 
+        # 4. 全体オッズ（人気上位30件）の構築
+        all_odds_list = []
+        if all_odds:
+            for combo, o_val in sorted(all_odds.items(), key=lambda x: x[1])[:30]:
+                p_val = benter_probs_dict.get(combo, 0.0) if benter_probs_dict else 0.0
+                ev_val = p_val * o_val
+                all_odds_list.append({
+                    'combo': combo,
+                    'odds': o_val,
+                    'prob': p_val,
+                    'ev': ev_val
+                })
+
         total_bet_golden = sum(bets.values()) if bets else 0
         total_bet_hit = sum(bets_hit_focused.values()) if bets_hit_focused else 0
 
@@ -1259,6 +1272,7 @@ def export_radar_state(
                 'bets_count_hit': len(bets_hit_focused) if bets_hit_focused else 0,
             },
             'boats': boats_list,
+            'all_odds': all_odds_list,
             'odds': odds_golden,
             'odds_golden': odds_golden,
             'odds_hit_focused': odds_hit_focused,
@@ -1291,10 +1305,35 @@ def export_radar_state(
             'updated_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
 
+        # 1. 単体 current_radar.json に保存
         with open(radar_path, 'w', encoding='utf-8') as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
+
+        # 2. 複数レースストック recent_radars.json に保存（最大5件）
+        recent_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'recent_radars.json')
+        recent_list = []
+        if os.path.exists(recent_path):
+            try:
+                with open(recent_path, 'r', encoding='utf-8') as rf:
+                    loaded = json.load(rf)
+                    if isinstance(loaded, list):
+                        recent_list = loaded
+            except Exception:
+                recent_list = []
+
+        # 重複レースの除外（同一会場・レース番号の古い推論を更新）
+        current_race_key = f"{race_info.get('venue_name')}_{race_info.get('race_no')}"
+        recent_list = [
+            r for r in recent_list 
+            if f"{r.get('race', {}).get('venue_name', r.get('venue_name', ''))}_{r.get('race', {}).get('race_no', r.get('race_no', 0))}" != current_race_key
+        ]
+        recent_list.insert(0, payload)
+        recent_list = recent_list[:5]
+
+        with open(recent_path, 'w', encoding='utf-8') as rf:
+            json.dump(recent_list, rf, ensure_ascii=False, indent=2)
     except Exception as e:
-        logger.debug(f"current_radar.json 出力例外: {e}")
+        logger.debug(f"radar_state 出力例外: {e}")
 
 
 def evaluate_race(
