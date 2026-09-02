@@ -1062,6 +1062,76 @@ def send_discord_notification(
 # 4. 黄金ベースライン レース評価エンジン
 # =====================================================================
 
+def calculate_dutching_bets(
+    benter_probs: Dict[str, float],
+    odds_dict: Dict[str, float],
+    budget: int = 1000,
+    target_cum_prob: float = 0.50,
+    max_combos: int = 8,
+    min_combos: int = 2
+) -> Dict[str, int]:
+    """
+    的中特化: 累積確率50%（最大8点）を抽出し、
+    オッズ逆数和によるダッチング資金配分とトリガミ回避ループを実行 (GUI表示用メモリ計算)
+    """
+    valid_combos = []
+    for combo, prob in sorted(benter_probs.items(), key=lambda x: x[1], reverse=True):
+        o = odds_dict.get(combo, 0.0)
+        if o > 1.0 and prob > 0:
+            valid_combos.append((combo, prob, o))
+            
+    if not valid_combos:
+        return {}
+        
+    selected = []
+    cum_p = 0.0
+    for item in valid_combos:
+        selected.append(item)
+        cum_p += item[1]
+        if (cum_p >= target_cum_prob or len(selected) >= max_combos) and len(selected) >= min_combos:
+            break
+            
+    if len(selected) < min_combos:
+        selected = valid_combos[:min(len(valid_combos), min_combos)]
+        
+    while len(selected) > min_combos:
+        s_val = sum(1.0 / o for _, _, o in selected)
+        if s_val < 0.95:
+            break
+        selected.pop()
+        
+    def allocate(combos_list, target_budget):
+        s = sum(1.0 / o for _, _, o in combos_list)
+        if s <= 0:
+            return {c: 100 for c, _, _ in combos_list}
+        res = {}
+        for c, _, o in combos_list:
+            raw = target_budget * ((1.0 / o) / s)
+            amt = max(100, int(round(raw / 100.0)) * 100)
+            res[c] = amt
+        return res
+        
+    bets = allocate(selected, budget)
+    
+    for _ in range(5):
+        tot = sum(bets.values())
+        trigami_found = False
+        for c, _, o in list(selected):
+            payout = bets.get(c, 0) * o
+            if payout <= tot:
+                trigami_found = True
+                if (bets[c] + 100) * o > (tot + 100):
+                    bets[c] += 100
+                elif len(selected) > min_combos:
+                    selected.pop()
+                    bets = allocate(selected, budget)
+                    break
+        if not trigami_found:
+            break
+            
+    return bets
+
+
 def export_radar_state(
     race_info: Dict[str, Any],
     ai_eval: Dict[str, Any],
@@ -1070,7 +1140,8 @@ def export_radar_state(
     p1_dict_honmei: Optional[Dict[int, float]] = None,
     all_odds: Optional[Dict[str, float]] = None,
     benter_probs_dict: Optional[Dict[str, float]] = None,
-    bets: Optional[Dict[str, int]] = None
+    bets: Optional[Dict[str, int]] = None,
+    bets_hit_focused: Optional[Dict[str, int]] = None
 ) -> None:
     """最新の推論・全評価状態を階層構造の current_radar.json に上書き出力"""
     try:
@@ -1119,8 +1190,8 @@ def export_radar_state(
 
             boats_list.append(b_dict)
 
-        # 2. オッズ & EV 候補リストの構築
-        odds_list = []
+        # 2. 黄金ベースライン (Sniper) オッズリストの構築
+        odds_golden = []
         if all_odds:
             candidate_combos = []
             if benter_probs_dict:
@@ -1138,10 +1209,10 @@ def export_radar_state(
                         'is_recommended': rec_amt > 0
                     })
                 candidate_combos.sort(key=lambda x: (x['is_recommended'], x['ev']), reverse=True)
-                odds_list = candidate_combos[:15]
+                odds_golden = candidate_combos[:15]
             else:
                 for combo, o_val in sorted(all_odds.items(), key=lambda x: x[1])[:10]:
-                    odds_list.append({
+                    odds_golden.append({
                         'combo': combo,
                         'odds': o_val,
                         'prob': 0.0,
@@ -1151,11 +1222,46 @@ def export_radar_state(
                         'is_recommended': False
                     })
 
+        # 3. 的中特化 (Dutching) オッズリストの構築
+        odds_hit_focused = []
+        if all_odds and benter_probs_dict:
+            total_hit_bet = sum(bets_hit_focused.values()) if bets_hit_focused else 0
+            candidate_hit = []
+            for combo, prob in benter_probs_dict.items():
+                o_val = all_odds.get(combo, 0.0)
+                ev_val = prob * o_val
+                rec_amt = bets_hit_focused.get(combo, 0) if bets_hit_focused else 0
+                exp_ret = int((rec_amt / 100.0) * o_val * 100.0) if rec_amt > 0 else 0
+                profit = (exp_ret - total_hit_bet) if rec_amt > 0 else 0
+                candidate_hit.append({
+                    'combo': combo,
+                    'odds': o_val,
+                    'prob': prob,
+                    'ev': ev_val,
+                    'recommended_amount': rec_amt,
+                    'expected_return': exp_ret,
+                    'profit': profit,
+                    'is_recommended': rec_amt > 0
+                })
+            candidate_hit.sort(key=lambda x: (x['is_recommended'], x['prob']), reverse=True)
+            odds_hit_focused = candidate_hit[:15]
+
+        total_bet_golden = sum(bets.values()) if bets else 0
+        total_bet_hit = sum(bets_hit_focused.values()) if bets_hit_focused else 0
+
         payload = {
             'race': race_info,
-            'ai_eval': ai_eval,
+            'ai_eval': {
+                **ai_eval,
+                'total_bet_golden': total_bet_golden,
+                'bets_count_golden': len(bets) if bets else 0,
+                'total_bet_hit': total_bet_hit,
+                'bets_count_hit': len(bets_hit_focused) if bets_hit_focused else 0,
+            },
             'boats': boats_list,
-            'odds': odds_list,
+            'odds': odds_golden,
+            'odds_golden': odds_golden,
+            'odds_hit_focused': odds_hit_focused,
             # フラット互換
             'race_name': race_info.get('race_name', ''),
             'venue_name': race_info.get('venue_name', ''),
@@ -1170,8 +1276,8 @@ def export_radar_state(
             'sniper_node': ai_eval.get('sniper_node', ''),
             'status': ai_eval.get('status', ''),
             'status_message': ai_eval.get('status_message', ''),
-            'total_bet': ai_eval.get('total_bet', 0),
-            'bets_count': ai_eval.get('bets_count', 0),
+            'total_bet': total_bet_golden,
+            'bets_count': len(bets) if bets else 0,
             'bets': [
                 {
                     'combo': o['combo'],
@@ -1180,7 +1286,7 @@ def export_radar_state(
                     'ev': o['ev'],
                     'expected_return': o['expected_return']
                 }
-                for o in odds_list if o.get('is_recommended')
+                for o in odds_golden if o.get('is_recommended')
             ],
             'updated_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
@@ -1443,6 +1549,20 @@ def evaluate_race(
     )
     benter_probs_dict = {p['combo']: p['prob'] for p in benter_probs}
     
+    # 的中特化（動的ダッチング）をメモリ上で計算 (Supabaseには保存せず、GUI表示用のみ)
+    bets_hit_focused = {}
+    if benter_probs_dict and all_odds:
+        try:
+            bets_hit_focused = calculate_dutching_bets(
+                benter_probs=benter_probs_dict,
+                odds_dict=all_odds,
+                budget=1000,
+                target_cum_prob=0.50,
+                max_combos=8,
+                min_combos=2
+            )
+        except Exception: pass
+
     # 8. ポートフォリオ最適化 (SLSQP / 固定ウェイト 5%)
     optimizer = PortfolioOptimizer()
     bets = optimizer.optimize_funds(
@@ -1491,7 +1611,8 @@ def evaluate_race(
             p1_dict_honmei=p1_dict_honmei,
             all_odds=all_odds,
             benter_probs_dict=benter_probs_dict,
-            bets={}
+            bets={},
+            bets_hit_focused=bets_hit_focused
         )
         return {
             'status': 'no_value_bets',
@@ -1536,7 +1657,8 @@ def evaluate_race(
         p1_dict_honmei=p1_dict_honmei,
         all_odds=all_odds,
         benter_probs_dict=benter_probs_dict,
-        bets=bets
+        bets=bets,
+        bets_hit_focused=bets_hit_focused
     )
     
     send_discord_notification(
@@ -1874,6 +1996,20 @@ def evaluate_mock_race(
     )
     benter_probs_dict = {p['combo']: p['prob'] for p in benter_probs}
     
+    # 的中特化（動的ダッチング）をメモリ上で計算 (Supabaseには保存せず、GUI表示用のみ)
+    bets_hit_focused = {}
+    if benter_probs_dict and all_odds:
+        try:
+            bets_hit_focused = calculate_dutching_bets(
+                benter_probs=benter_probs_dict,
+                odds_dict=all_odds,
+                budget=1000,
+                target_cum_prob=0.50,
+                max_combos=8,
+                min_combos=2
+            )
+        except Exception: pass
+
     # 最適化
     optimizer = PortfolioOptimizer()
     bets = optimizer.optimize_funds(
@@ -1913,7 +2049,8 @@ def evaluate_mock_race(
             p1_dict_honmei=p1_dict_honmei,
             all_odds=all_odds,
             benter_probs_dict=benter_probs_dict,
-            bets={}
+            bets={},
+            bets_hit_focused=bets_hit_focused
         )
     else:
         export_radar_state(
@@ -1937,7 +2074,8 @@ def evaluate_mock_race(
             p1_dict_honmei=p1_dict_honmei,
             all_odds=all_odds,
             benter_probs_dict=benter_probs_dict,
-            bets=bets
+            bets=bets,
+            bets_hit_focused=bets_hit_focused
         )
     
     # Supabase 保存

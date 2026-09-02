@@ -1,10 +1,12 @@
 """
 live_radar.py
-🚤 BOATRACE AI 統合ライブモニター (CustomTkinter 3カラム版)
+🚤 BOATRACE AI 統合ライブモニター (CustomTkinter 3カラム・並列オッズ版)
 - current_radar.json の更新を1秒ごとに監視
-- 【左カラム: AI Radar】Gatekeeper P1・Sniper判定・水面気象
+- 【左カラム: AI Radar】Gatekeeper P1・Sniper判定・水面気象・各モード投資サマリー
 - 【中央カラム: 出走表＆直前情報】1〜6号艇のモーター率・展示タイム・チルト・ST
-- 【右カラム: オッズ＆期待値】Benter展開確率・実オッズ・EV・推奨資金配分
+- 【右カラム: オッズ＆期待値】
+    - 上段: 🎯 黄金ベースライン (Sniper / EV重視)
+    - 下段: 🛡️ 的中特化 (Dutching / トリガミ回避)
 """
 
 import os
@@ -37,9 +39,9 @@ class IntegratedLiveRadar(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("🚤 BOATRACE AI Integrated Live Radar")
-        self.geometry("1060x650")
-        self.minsize(980, 580)
+        self.title("🚤 BOATRACE AI Integrated Live Radar (Dual Strategy)")
+        self.geometry("1100x680")
+        self.minsize(1020, 600)
 
         self.last_mtime = 0
         self.boat_widgets = {}
@@ -59,7 +61,7 @@ class IntegratedLiveRadar(ctk.CTk):
 
         self.lbl_app_title = ctk.CTkLabel(
             self.header_frame,
-            text="🚤 BOATRACE AI Integrated Live Radar",
+            text="🚤 BOATRACE AI Live Radar",
             font=ctk.CTkFont(size=14, weight="bold"),
             text_color="#00E5FF"
         )
@@ -88,30 +90,30 @@ class IntegratedLiveRadar(ctk.CTk):
         self.main_container.pack(fill="both", expand=True, padx=12, pady=4)
 
         # ---------------------------------------------------------------------
-        # 【左カラム: AI Radar】 (幅: 約320px)
+        # 【左カラム: AI Radar】 (幅: 約310px)
         # ---------------------------------------------------------------------
-        self.col_left = ctk.CTkFrame(self.main_container, width=320, corner_radius=10, fg_color="#1E1E26")
-        self.col_left.pack(side="left", fill="both", padx=(0, 6), pady=0)
+        self.col_left = ctk.CTkFrame(self.main_container, width=310, corner_radius=10, fg_color="#1E1E26")
+        self.col_left.pack(side="left", fill="both", padx=(0, 5), pady=0)
         self.col_left.pack_propagate(False)
 
         lbl_col1_title = ctk.CTkLabel(
             self.col_left, text="🛡️ AI Radar (評価 & 判定)",
             font=ctk.CTkFont(size=13, weight="bold"), text_color="#00E5FF"
         )
-        lbl_col1_title.pack(anchor="w", padx=12, pady=(10, 4))
+        lbl_col1_title.pack(anchor="w", padx=12, pady=(8, 2))
 
         # Gatekeeper P1 信頼度ボックス
         self.box_gk = ctk.CTkFrame(self.col_left, corner_radius=8, fg_color="#16161D")
-        self.box_gk.pack(fill="x", padx=10, pady=4)
+        self.box_gk.pack(fill="x", padx=10, pady=3)
 
         self.lbl_p1_title = ctk.CTkLabel(self.box_gk, text="Gatekeeper P1 (1着勝率)", font=ctk.CTkFont(size=11), text_color="#888888")
-        self.lbl_p1_title.pack(anchor="w", padx=10, pady=(6, 0))
+        self.lbl_p1_title.pack(anchor="w", padx=10, pady=(5, 0))
 
-        self.lbl_p1_val = ctk.CTkLabel(self.box_gk, text="--.-%", font=ctk.CTkFont(size=26, weight="bold"), text_color="#AAAAAA")
+        self.lbl_p1_val = ctk.CTkLabel(self.box_gk, text="--.-%", font=ctk.CTkFont(size=24, weight="bold"), text_color="#AAAAAA")
         self.lbl_p1_val.pack(anchor="w", padx=10, pady=(0, 2))
 
-        self.progress_p1 = ctk.CTkProgressBar(self.box_gk, height=12, corner_radius=6)
-        self.progress_p1.pack(fill="x", padx=10, pady=(2, 4))
+        self.progress_p1 = ctk.CTkProgressBar(self.box_gk, height=10, corner_radius=5)
+        self.progress_p1.pack(fill="x", padx=10, pady=(1, 3))
         self.progress_p1.set(0.0)
         self.progress_p1.configure(progress_color="#666666")
 
@@ -119,47 +121,53 @@ class IntegratedLiveRadar(ctk.CTk):
             self.box_gk, text="基準閾値: 74.38% (黄金ベースライン)",
             font=ctk.CTkFont(size=10), text_color="#777777"
         )
-        self.lbl_gk_threshold.pack(anchor="e", padx=10, pady=(0, 6))
+        self.lbl_gk_threshold.pack(anchor="e", padx=10, pady=(0, 4))
 
         # 最終判定ステータスバッジ
         self.box_verdict = ctk.CTkFrame(self.col_left, corner_radius=8, fg_color="#16161D")
-        self.box_verdict.pack(fill="x", padx=10, pady=4)
+        self.box_verdict.pack(fill="x", padx=10, pady=3)
 
         self.lbl_verdict_badge = ctk.CTkLabel(
             self.box_verdict, text="⏳ 待機中",
-            font=ctk.CTkFont(size=15, weight="bold"),
-            text_color="#FFB300", fg_color="#332B00", corner_radius=6, padx=10, pady=4
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color="#FFB300", fg_color="#332B00", corner_radius=6, padx=10, pady=3
         )
-        self.lbl_verdict_badge.pack(padx=10, pady=(8, 4))
+        self.lbl_verdict_badge.pack(padx=10, pady=(6, 3))
 
         self.lbl_verdict_msg = ctk.CTkLabel(
             self.box_verdict, text="推論実行を待機しています...",
-            font=ctk.CTkFont(size=11), text_color="#BBBBBB", wraplength=280
+            font=ctk.CTkFont(size=11), text_color="#BBBBBB", wraplength=270
         )
-        self.lbl_verdict_msg.pack(padx=10, pady=(0, 8))
+        self.lbl_verdict_msg.pack(padx=10, pady=(0, 6))
 
         # 水面・気象・環境カード
         self.box_env = ctk.CTkFrame(self.col_left, corner_radius=8, fg_color="#16161D")
-        self.box_env.pack(fill="x", padx=10, pady=4)
+        self.box_env.pack(fill="x", padx=10, pady=3)
 
         self.lbl_cluster_name = ctk.CTkLabel(self.box_env, text="🏟️ クラスタ: --", font=ctk.CTkFont(size=11, weight="bold"), text_color="#E0E0E0")
-        self.lbl_cluster_name.pack(anchor="w", padx=10, pady=(6, 2))
+        self.lbl_cluster_name.pack(anchor="w", padx=10, pady=(5, 1))
 
         self.lbl_wave_stat = ctk.CTkLabel(self.box_env, text="🌊 波高: -- cm", font=ctk.CTkFont(size=11), text_color="#AAAAAA")
         self.lbl_wave_stat.pack(anchor="w", padx=10, pady=1)
 
         self.lbl_wind_stat = ctk.CTkLabel(self.box_env, text="🍃 風況: --", font=ctk.CTkFont(size=11), text_color="#AAAAAA")
-        self.lbl_wind_stat.pack(anchor="w", padx=10, pady=(1, 6))
+        self.lbl_wind_stat.pack(anchor="w", padx=10, pady=(1, 5))
 
-        # 投資総額サマリー
+        # 投資サマリー（黄金 vs 的中特化）
         self.box_summary = ctk.CTkFrame(self.col_left, corner_radius=8, fg_color="#16161D")
-        self.box_summary.pack(fill="x", padx=10, pady=4)
+        self.box_summary.pack(fill="x", padx=10, pady=3)
 
-        self.lbl_invest_summary = ctk.CTkLabel(
-            self.box_summary, text="💰 推奨投資総額: 0 円 (0点)",
-            font=ctk.CTkFont(size=12, weight="bold"), text_color="#00E676"
+        self.lbl_golden_summary = ctk.CTkLabel(
+            self.box_summary, text="🎯 黄金投資: 0 円 (0点)",
+            font=ctk.CTkFont(size=11, weight="bold"), text_color="#00E676"
         )
-        self.lbl_invest_summary.pack(padx=10, pady=8)
+        self.lbl_golden_summary.pack(anchor="w", padx=10, pady=(6, 2))
+
+        self.lbl_hit_summary = ctk.CTkLabel(
+            self.box_summary, text="🛡️ 的中投資: 0 円 (0点)",
+            font=ctk.CTkFont(size=11, weight="bold"), text_color="#00E5FF"
+        )
+        self.lbl_hit_summary.pack(anchor="w", padx=10, pady=(0, 6))
 
         # ---------------------------------------------------------------------
         # 【中央カラム: 出走表＆直前情報】 (幅: 約440px)
@@ -171,11 +179,11 @@ class IntegratedLiveRadar(ctk.CTk):
             self.col_center, text="📋 出走表 & 直前展示タイム",
             font=ctk.CTkFont(size=13, weight="bold"), text_color="#00E5FF"
         )
-        lbl_col2_title.pack(anchor="w", padx=12, pady=(10, 4))
+        lbl_col2_title.pack(anchor="w", padx=12, pady=(8, 2))
 
         # 表ヘッダー
-        self.table_header = ctk.CTkFrame(self.col_center, height=26, corner_radius=4, fg_color="#141419")
-        self.table_header.pack(fill="x", padx=8, pady=(2, 4))
+        self.table_header = ctk.CTkFrame(self.col_center, height=24, corner_radius=4, fg_color="#141419")
+        self.table_header.pack(fill="x", padx=8, pady=(2, 3))
 
         headers = [("艇/選手", 90), ("モータ", 55), ("ボート", 50), ("展示T", 50), ("チルト", 45), ("ST", 45), ("P1勝率", 60)]
         for h_text, h_w in headers:
@@ -184,7 +192,7 @@ class IntegratedLiveRadar(ctk.CTk):
 
         # 1〜6号艇の行コンテナ
         self.boats_container = ctk.CTkFrame(self.col_center, fg_color="transparent")
-        self.boats_container.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self.boats_container.pack(fill="both", expand=True, padx=8, pady=(0, 6))
 
         for bn in range(1, 7):
             bg_col, fg_col = BOAT_COLORS[bn]
@@ -240,33 +248,43 @@ class IntegratedLiveRadar(ctk.CTk):
             }
 
         # ---------------------------------------------------------------------
-        # 【右カラム: オッズ＆期待値】 (幅: 約290px)
+        # 【右カラム: オッズ＆期待値 (上下2段分割)】 (幅: 約320px)
         # ---------------------------------------------------------------------
-        self.col_right = ctk.CTkFrame(self.main_container, width=290, corner_radius=10, fg_color="#1E1E26")
+        self.col_right = ctk.CTkFrame(self.main_container, width=320, corner_radius=10, fg_color="#1E1E26")
         self.col_right.pack(side="left", fill="both", padx=(3, 0), pady=0)
         self.col_right.pack_propagate(False)
 
-        lbl_col3_title = ctk.CTkLabel(
-            self.col_right, text="🎯 オッズ & Benter EV期待値",
-            font=ctk.CTkFont(size=13, weight="bold"), text_color="#00E5FF"
-        )
-        lbl_col3_title.pack(anchor="w", padx=12, pady=(10, 4))
+        # 上段: 🎯 黄金ベースライン (Sniper / SLSQP)
+        self.frame_golden_section = ctk.CTkFrame(self.col_right, fg_color="transparent")
+        self.frame_golden_section.pack(fill="both", expand=True, padx=6, pady=(6, 3))
 
-        # オッズリスト用スクロール可能フレーム
-        self.scroll_odds = ctk.CTkScrollableFrame(self.col_right, fg_color="#16161D", corner_radius=6)
-        self.scroll_odds.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-
-        self.lbl_empty_odds = ctk.CTkLabel(
-            self.scroll_odds, text="オッズ・買い目データ待機中...",
-            font=ctk.CTkFont(size=11), text_color="#777777"
+        self.lbl_golden_title = ctk.CTkLabel(
+            self.frame_golden_section, text="🎯 黄金ベースライン (Sniper / EV)",
+            font=ctk.CTkFont(size=12, weight="bold"), text_color="#00E676"
         )
-        self.lbl_empty_odds.pack(pady=20)
+        self.lbl_golden_title.pack(anchor="w", padx=6, pady=(2, 2))
+
+        self.scroll_golden = ctk.CTkScrollableFrame(self.frame_golden_section, fg_color="#16161D", corner_radius=6)
+        self.scroll_golden.pack(fill="both", expand=True, padx=4, pady=(0, 2))
+
+        # 下段: 🛡️ 的中特化 (Dutching / 累積50%)
+        self.frame_hit_section = ctk.CTkFrame(self.col_right, fg_color="transparent")
+        self.frame_hit_section.pack(fill="both", expand=True, padx=6, pady=(3, 6))
+
+        self.lbl_hit_title = ctk.CTkLabel(
+            self.frame_hit_section, text="🛡️ 的中特化 (Dutching / 累積50%)",
+            font=ctk.CTkFont(size=12, weight="bold"), text_color="#00E5FF"
+        )
+        self.lbl_hit_title.pack(anchor="w", padx=6, pady=(2, 2))
+
+        self.scroll_hit = ctk.CTkScrollableFrame(self.frame_hit_section, fg_color="#16161D", corner_radius=6)
+        self.scroll_hit.pack(fill="both", expand=True, padx=4, pady=(0, 2))
 
         # =====================================================================
         # 3. 最下部 フッターバー
         # =====================================================================
-        self.footer_frame = ctk.CTkFrame(self, height=28, fg_color="transparent")
-        self.footer_frame.pack(fill="x", padx=16, pady=(2, 6))
+        self.footer_frame = ctk.CTkFrame(self, height=26, fg_color="transparent")
+        self.footer_frame.pack(fill="x", padx=16, pady=(1, 5))
 
         self.lbl_indicator = ctk.CTkLabel(
             self.footer_frame,
@@ -307,7 +325,8 @@ class IntegratedLiveRadar(ctk.CTk):
         race = data.get("race", {})
         ai = data.get("ai_eval", {})
         boats = data.get("boats", [])
-        odds = data.get("odds", [])
+        odds_golden = data.get("odds_golden") or data.get("odds", [])
+        odds_hit = data.get("odds_hit_focused", [])
         updated_at = data.get("updated_at", "")
 
         # 1. ヘッダー更新
@@ -358,9 +377,14 @@ class IntegratedLiveRadar(ctk.CTk):
         wave = ai.get("wave_height") if "wave_height" in ai else data.get("wave_height", 0.0)
         self.lbl_wave_stat.configure(text=f"🌊 波高: {wave:.1f} cm")
 
-        total_bet = ai.get("total_bet") if "total_bet" in ai else data.get("total_bet", 0)
-        bets_cnt = ai.get("bets_count") if "bets_count" in ai else data.get("bets_count", 0)
-        self.lbl_invest_summary.configure(text=f"💰 推奨投資総額: {total_bet:,} 円 ({bets_cnt}点)")
+        # 投資サマリー
+        tot_golden = ai.get("total_bet_golden") if "total_bet_golden" in ai else data.get("total_bet", 0)
+        cnt_golden = ai.get("bets_count_golden") if "bets_count_golden" in ai else data.get("bets_count", 0)
+        self.lbl_golden_summary.configure(text=f"🎯 黄金投資: {tot_golden:,} 円 ({cnt_golden}点)")
+
+        tot_hit = ai.get("total_bet_hit", 0)
+        cnt_hit = ai.get("bets_count_hit", 0)
+        self.lbl_hit_summary.configure(text=f"🛡️ 的中投資: {tot_hit:,} 円 ({cnt_hit}点)")
 
         # 3. 【中央カラム: 出走表＆直前情報】
         if boats:
@@ -389,18 +413,18 @@ class IntegratedLiveRadar(ctk.CTk):
                     p1_v = b.get('p1_prob', 0.0)
                     w['p1'].configure(text=f"{p1_v:.1%}")
 
-                    # 1号艇や本命艇のハイライト
+                    # 本命艇ハイライト
                     if bn == top_boat and p1 >= 0.7438:
-                        w['frame'].configure(fg_color="#002A18")  # エメラルドハイライト
+                        w['frame'].configure(fg_color="#002A18")
                     else:
                         w['frame'].configure(fg_color="#16161D")
 
-        # 4. 【右カラム: オッズ＆期待値】
-        for child in self.scroll_odds.winfo_children():
+        # 4. 【右カラム上段: 黄金ベースライン】
+        for child in self.scroll_golden.winfo_children():
             child.destroy()
 
-        if odds:
-            for o in odds:
+        if odds_golden:
+            for o in odds_golden:
                 combo = o.get("combo", "")
                 odds_val = o.get("odds", 0.0)
                 prob_val = o.get("prob", 0.0)
@@ -409,47 +433,77 @@ class IntegratedLiveRadar(ctk.CTk):
                 exp_ret = o.get("expected_return", 0)
                 is_rec = o.get("is_recommended", False) or (rec_amt > 0)
 
-                card_bg = "#00391C" if is_rec else "#1A1A22"
+                card_bg = "#00391C" if is_rec else "#181820"
                 border_col = "#00E676" if is_rec else "transparent"
 
-                card = ctk.CTkFrame(self.scroll_odds, corner_radius=6, fg_color=card_bg, border_width=1 if is_rec else 0, border_color=border_col)
-                card.pack(fill="x", pady=2, padx=2)
+                card = ctk.CTkFrame(self.scroll_golden, corner_radius=5, fg_color=card_bg, border_width=1 if is_rec else 0, border_color=border_col)
+                card.pack(fill="x", pady=1, padx=1)
 
                 top_row = ctk.CTkFrame(card, fg_color="transparent")
-                top_row.pack(fill="x", padx=6, pady=(4, 1))
+                top_row.pack(fill="x", padx=5, pady=(3, 1))
 
-                lbl_combo = ctk.CTkLabel(
-                    top_row, text=f"{combo}",
-                    font=ctk.CTkFont(size=12, weight="bold"),
-                    text_color="#FFFFFF" if not is_rec else "#00E676"
-                )
-                lbl_combo.pack(side="left")
+                lbl_c = ctk.CTkLabel(top_row, text=f"{combo}", font=ctk.CTkFont(size=11, weight="bold"), text_color="#FFFFFF" if not is_rec else "#00E676")
+                lbl_c.pack(side="left")
 
-                lbl_odds = ctk.CTkLabel(
-                    top_row, text=f"{odds_val:.1f}倍",
-                    font=ctk.CTkFont(size=12, weight="bold"),
-                    text_color="#FFD600"
-                )
-                lbl_odds.pack(side="right")
+                lbl_o = ctk.CTkLabel(top_row, text=f"{odds_val:.1f}倍", font=ctk.CTkFont(size=11, weight="bold"), text_color="#FFD600")
+                lbl_o.pack(side="right")
 
                 bot_row = ctk.CTkFrame(card, fg_color="transparent")
-                bot_row.pack(fill="x", padx=6, pady=(0, 4))
+                bot_row.pack(fill="x", padx=5, pady=(0, 3))
 
-                sub_txt = f"EV {ev_val:.2f} (勝率 {prob_val:.1%})"
+                sub_txt = f"EV {ev_val:.2f} ({prob_val:.1%})"
                 if is_rec:
-                    sub_txt = f"🎯 {rec_amt:,}円 (払戻見込: {exp_ret:,}円) | EV {ev_val:.2f}"
+                    sub_txt = f"🎯 {rec_amt:,}円 (払戻 {exp_ret:,}円) | EV {ev_val:.2f}"
 
-                lbl_sub = ctk.CTkLabel(
-                    bot_row, text=sub_txt,
-                    font=ctk.CTkFont(size=10),
-                    text_color="#00E5FF" if is_rec else "#888888"
-                )
-                lbl_sub.pack(side="left")
+                lbl_s = ctk.CTkLabel(bot_row, text=sub_txt, font=ctk.CTkFont(size=10), text_color="#00E5FF" if is_rec else "#777777")
+                lbl_s.pack(side="left")
         else:
-            lbl_none = ctk.CTkLabel(self.scroll_odds, text="買い目データなし", font=ctk.CTkFont(size=11), text_color="#777777")
-            lbl_none.pack(pady=20)
+            lbl_none1 = ctk.CTkLabel(self.scroll_golden, text="買い目データなし", font=ctk.CTkFont(size=10), text_color="#777777")
+            lbl_none1.pack(pady=10)
 
-        # 5. フッター更新
+        # 5. 【右カラム下段: 的中特化 (Dutching)】
+        for child in self.scroll_hit.winfo_children():
+            child.destroy()
+
+        if odds_hit:
+            for o in odds_hit:
+                combo = o.get("combo", "")
+                odds_val = o.get("odds", 0.0)
+                prob_val = o.get("prob", 0.0)
+                rec_amt = o.get("recommended_amount", 0)
+                exp_ret = o.get("expected_return", 0)
+                profit = o.get("profit", 0)
+                is_rec = o.get("is_recommended", False) or (rec_amt > 0)
+
+                card_bg = "#002B3D" if is_rec else "#181820"
+                border_col = "#00E5FF" if is_rec else "transparent"
+
+                card = ctk.CTkFrame(self.scroll_hit, corner_radius=5, fg_color=card_bg, border_width=1 if is_rec else 0, border_color=border_col)
+                card.pack(fill="x", pady=1, padx=1)
+
+                top_row = ctk.CTkFrame(card, fg_color="transparent")
+                top_row.pack(fill="x", padx=5, pady=(3, 1))
+
+                lbl_c = ctk.CTkLabel(top_row, text=f"{combo}", font=ctk.CTkFont(size=11, weight="bold"), text_color="#FFFFFF" if not is_rec else "#00E5FF")
+                lbl_c.pack(side="left")
+
+                lbl_o = ctk.CTkLabel(top_row, text=f"{odds_val:.1f}倍", font=ctk.CTkFont(size=11, weight="bold"), text_color="#FFD600")
+                lbl_o.pack(side="right")
+
+                bot_row = ctk.CTkFrame(card, fg_color="transparent")
+                bot_row.pack(fill="x", padx=5, pady=(0, 3))
+
+                sub_txt = f"勝率 {prob_val:.1%}"
+                if is_rec:
+                    sub_txt = f"🛡️ {rec_amt:,}円 (払戻 {exp_ret:,}円 / 利益 {profit:+,}円)"
+
+                lbl_s = ctk.CTkLabel(bot_row, text=sub_txt, font=ctk.CTkFont(size=10), text_color="#00E676" if is_rec else "#777777")
+                lbl_s.pack(side="left")
+        else:
+            lbl_none2 = ctk.CTkLabel(self.scroll_hit, text="的中特化データなし", font=ctk.CTkFont(size=10), text_color="#777777")
+            lbl_none2.pack(pady=10)
+
+        # 6. フッター更新
         self.lbl_indicator.configure(text="🟢 リアルタイム監視中 (Live Connected)", text_color="#00E676")
         self.lbl_updated.configure(text=f"最終更新: {updated_at}")
 
