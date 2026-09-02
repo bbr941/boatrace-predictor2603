@@ -1501,7 +1501,7 @@ else:
                     venue_name=venue_name, race_no=race_no, deadline_time="マニュアル",
                     top_boat=None, max_p1=None, prob_gap=None, gatekeeper_passed=False,
                     cluster_id=cluster_id, cluster_name=cluster_name, status="skipped_cluster1",
-                    source="manual"
+                    source="manual", table_name="manual_race_predictions"
                 )
             except Exception: pass
             st.stop()
@@ -1636,7 +1636,7 @@ else:
                     venue_name=venue_name, race_no=race_no, deadline_time="マニュアル",
                     top_boat=top_boat, max_p1=max_p1, prob_gap=prob_gap, gatekeeper_passed=False,
                     cluster_id=cluster_id, cluster_name=cluster_name, status="gatekeeper_skipped",
-                    source="manual"
+                    source="manual", table_name="manual_race_predictions"
                 )
             except Exception: pass
             st.stop()
@@ -1673,7 +1673,7 @@ else:
                         venue_name=venue_name, race_no=race_no, deadline_time="マニュアル",
                         top_boat=top_boat, max_p1=max_p1, prob_gap=prob_gap, gatekeeper_passed=True,
                         cluster_id=cluster_id, cluster_name=cluster_name, status="sniper_skipped",
-                        source="manual"
+                        source="manual", table_name="manual_race_predictions"
                     )
                 except Exception: pass
                 st.stop()
@@ -1770,10 +1770,10 @@ else:
                     venue_name=venue_name, race_no=race_no, deadline_time="マニュアル",
                     top_boat=top_boat, max_p1=max_p1, prob_gap=prob_gap, gatekeeper_passed=True,
                     cluster_id=cluster_id, cluster_name=cluster_name, status=status_success_name,
-                    source="manual"
+                    source="manual", table_name="manual_race_predictions"
                 )
-                db_manager.save_recommended_bets(race_id, bets, benter_probs_dict, all_odds)
-                st.caption(f"💾 推論結果および推奨買い目を Supabase データベースに自動保存しました (Status: `{status_success_name}`, Source: `manual`)。")
+                db_manager.save_recommended_bets(race_id, bets, benter_probs_dict, all_odds, table_name="manual_recommended_bets")
+                st.caption(f"💾 推論結果および推奨買い目を Supabase データベース（マニュアル専用テーブル）に自動保存しました (Status: `{status_success_name}`, Source: `manual`)。")
             except Exception as e:
                 st.caption(f"⚠️ DB保存例外: {e}")
         else:
@@ -1784,7 +1784,7 @@ else:
                     venue_name=venue_name, race_no=race_no, deadline_time="マニュアル",
                     top_boat=top_boat, max_p1=max_p1, prob_gap=prob_gap, gatekeeper_passed=True,
                     cluster_id=cluster_id, cluster_name=cluster_name, status="no_value_bets",
-                    source="manual"
+                    source="manual", table_name="manual_race_predictions"
                 )
             except Exception: pass
 

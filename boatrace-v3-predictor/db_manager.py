@@ -262,6 +262,48 @@ def init_database() -> bool:
                 CONSTRAINT uq_recent_exhibition UNIQUE (race_date, venue_code, race_no, racer_id)
             );
             """)
+
+            # 6. マニュアル専用テーブル
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS manual_race_predictions (
+                id SERIAL PRIMARY KEY,
+                race_id VARCHAR(50) UNIQUE NOT NULL,
+                race_date VARCHAR(10) NOT NULL,
+                venue_code INT NOT NULL,
+                venue_name VARCHAR(20) NOT NULL,
+                race_no INT NOT NULL,
+                deadline_time VARCHAR(20),
+                top_boat INT,
+                max_p1 FLOAT,
+                prob_gap FLOAT,
+                gatekeeper_passed BOOLEAN DEFAULT FALSE,
+                cluster_id INT,
+                cluster_name VARCHAR(50),
+                status VARCHAR(50) NOT NULL,
+                source VARCHAR(20) DEFAULT 'manual',
+                actual_result VARCHAR(10),
+                payout INT DEFAULT 0,
+                profit INT DEFAULT 0,
+                is_resolved BOOLEAN DEFAULT FALSE,
+                hit_status VARCHAR(20),
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS manual_recommended_bets (
+                id SERIAL PRIMARY KEY,
+                race_id VARCHAR(50) NOT NULL,
+                combination VARCHAR(10) NOT NULL,
+                bet_amount INT NOT NULL,
+                prob FLOAT NOT NULL,
+                odds FLOAT NOT NULL,
+                ev FLOAT NOT NULL,
+                expected_return INT,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT uq_manual_race_bet UNIQUE(race_id, combination)
+            );
+            """)
             
             # インデックスの作成
             cur.execute("CREATE INDEX IF NOT EXISTS idx_race_pred_date ON race_predictions(race_date);")
@@ -272,8 +314,10 @@ def init_database() -> bool:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_odds_data_race ON odds_data(race_id);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_recent_ex_venue_racer ON recent_exhibitions(venue_code, racer_id, race_date);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_recent_ex_date ON recent_exhibitions(race_date);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_manual_pred_date ON manual_race_predictions(race_date);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_manual_bets_race ON manual_recommended_bets(race_id);")
             
-            logger.info("✅ [Supabase / PostgreSQL] 全5テーブルおよびインデックスのマイグレーションが完了しました！")
+            logger.info("✅ [Supabase / PostgreSQL] 全テーブルおよびインデックスのマイグレーションが完了しました！")
             
         else:
             logger.info("📁 [SQLite] テーブルスキーマのマイグレーションを開始します...")
@@ -367,14 +411,58 @@ def init_database() -> bool:
                 UNIQUE(race_date, venue_code, race_no, racer_id)
             );
             """)
+
+            # SQLite マニュアル専用テーブル
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS manual_race_predictions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                race_id TEXT UNIQUE NOT NULL,
+                race_date TEXT NOT NULL,
+                venue_code INTEGER NOT NULL,
+                venue_name TEXT NOT NULL,
+                race_no INTEGER NOT NULL,
+                deadline_time TEXT,
+                top_boat INTEGER,
+                max_p1 REAL,
+                prob_gap REAL,
+                gatekeeper_passed INTEGER DEFAULT 0,
+                cluster_id INTEGER,
+                cluster_name TEXT,
+                status TEXT NOT NULL,
+                source TEXT DEFAULT 'manual',
+                actual_result TEXT,
+                payout INTEGER DEFAULT 0,
+                profit INTEGER DEFAULT 0,
+                is_resolved INTEGER DEFAULT 0,
+                hit_status TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS manual_recommended_bets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                race_id TEXT NOT NULL,
+                combination TEXT NOT NULL,
+                bet_amount INTEGER NOT NULL,
+                prob REAL NOT NULL,
+                odds REAL NOT NULL,
+                ev REAL NOT NULL,
+                expected_return INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(race_id, combination)
+            );
+            """)
             
             cur.execute("CREATE INDEX IF NOT EXISTS idx_race_pred_date ON race_predictions(race_date);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_race_pred_source ON race_predictions(source);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_race_pred_resolved ON race_predictions(is_resolved);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_recent_ex_venue_racer ON recent_exhibitions(venue_code, racer_id, race_date);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_recent_ex_date ON recent_exhibitions(race_date);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_manual_pred_date ON manual_race_predictions(race_date);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_manual_bets_race ON manual_recommended_bets(race_id);")
             
-            logger.info("✅ [SQLite] 全5テーブルのマイグレーションが完了しました！")
+            logger.info("✅ [SQLite] 全テーブルのマイグレーションが完了しました！")
 
 
             
@@ -399,18 +487,22 @@ def save_race_prediction(
     cluster_id: Optional[int],
     cluster_name: Optional[str],
     status: str,
-    source: str = 'auto'
+    source: str = 'auto',
+    table_name: str = 'race_predictions'
 ) -> bool:
     """
     推論結果・Gatekeeper 判定結果を保存 (UPSERT)
+    table_name: 'race_predictions' または 'manual_race_predictions'
     """
+    target_table = 'manual_race_predictions' if table_name == 'manual_race_predictions' else 'race_predictions'
+
     with get_db_connection() as db:
         cur = db.cursor()
         ph = "%s" if db.is_postgres else "?"
         
         if db.is_postgres:
             query = f"""
-            INSERT INTO race_predictions (
+            INSERT INTO {target_table} (
                 race_id, race_date, venue_code, venue_name, race_no,
                 deadline_time, top_boat, max_p1, prob_gap, gatekeeper_passed,
                 cluster_id, cluster_name, status, source
@@ -428,7 +520,7 @@ def save_race_prediction(
             """
         else:
             query = f"""
-            INSERT INTO race_predictions (
+            INSERT INTO {target_table} (
                 race_id, race_date, venue_code, venue_name, race_no,
                 deadline_time, top_boat, max_p1, prob_gap, gatekeeper_passed,
                 cluster_id, cluster_name, status, source
@@ -451,7 +543,7 @@ def save_race_prediction(
             cluster_id, cluster_name, status, source
         )
         cur.execute(query, params)
-        logger.debug(f"Saved prediction for {race_id} (status: {status}, source: {source})")
+        logger.debug(f"Saved prediction for {race_id} into {target_table} (status: {status}, source: {source})")
         return True
 
 
@@ -460,14 +552,18 @@ def save_recommended_bets(
     race_id: str,
     bets: Dict[str, int],
     benter_probs: Dict[str, float],
-    all_odds: Dict[str, float]
+    all_odds: Dict[str, float],
+    table_name: str = 'recommended_bets'
 ) -> int:
     """
     選出された最適化買い目を保存 (UPSERT)
+    table_name: 'recommended_bets' または 'manual_recommended_bets'
     """
     if not bets:
         return 0
         
+    target_table = 'manual_recommended_bets' if table_name == 'manual_recommended_bets' else 'recommended_bets'
+
     with get_db_connection() as db:
         cur = db.cursor()
         ph = "%s" if db.is_postgres else "?"
@@ -481,7 +577,7 @@ def save_recommended_bets(
             
             if db.is_postgres:
                 query = f"""
-                INSERT INTO recommended_bets (
+                INSERT INTO {target_table} (
                     race_id, combination, bet_amount, prob, odds, ev, expected_return
                 ) VALUES ({', '.join([ph]*7)})
                 ON CONFLICT (race_id, combination) DO UPDATE SET
@@ -494,7 +590,7 @@ def save_recommended_bets(
                 """
             else:
                 query = f"""
-                INSERT INTO recommended_bets (
+                INSERT INTO {target_table} (
                     race_id, combination, bet_amount, prob, odds, ev, expected_return
                 ) VALUES ({', '.join([ph]*7)})
                 ON CONFLICT(race_id, combination) DO UPDATE SET
@@ -508,7 +604,7 @@ def save_recommended_bets(
             cur.execute(query, (race_id, combo, int(amt), p, o, ev, exp_ret))
             count += 1
             
-        logger.info(f"💾 [{race_id}] {count} 件の推奨買い目をデータベースに保存しました。")
+        logger.info(f"💾 [{race_id}] {count} 件の推奨買い目を {target_table} に保存しました。")
         return count
 
 

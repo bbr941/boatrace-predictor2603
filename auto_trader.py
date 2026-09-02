@@ -1471,47 +1471,7 @@ def evaluate_race(
     b1_motor_rate = float(b1_feat['motor_rate'].iloc[0]) if (len(b1_feat) > 0 and 'motor_rate' in b1_feat.columns and pd.notna(b1_feat['motor_rate'].iloc[0])) else 0.0
     wave_height = float(df_feat['wave_height'].iloc[0]) if ('wave_height' in df_feat.columns and pd.notna(df_feat['wave_height'].iloc[0])) else 0.0
 
-    # Gatekeeper 閾値判定 ($P_1 \ge 0.7438$)
-    if max_p1 < gatekeeper_th:
-        logger.info(f"☕ [{venue_name} {race_no}R] Gatekeeper 未達 (P1 = {max_p1:.2%} < {gatekeeper_th:.2%}) -> 見送り (No Bet)")
-        try:
-            db_manager.save_race_prediction(
-                race_id=race_id, race_date=date_str, venue_code=venue_code,
-                venue_name=venue_name, race_no=race_no, deadline_time=deadline_str,
-                top_boat=top_boat, max_p1=max_p1, prob_gap=prob_gap, gatekeeper_passed=False,
-                cluster_id=cluster_id, cluster_name=cluster_name, status="gatekeeper_skipped",
-                source="auto"
-            )
-        except Exception: pass
-        
-        export_radar_state(
-            race_info=race_info,
-            ai_eval={
-                'p1_score': max_p1,
-                'top_boat': top_boat,
-                'prob_gap': prob_gap,
-                'gatekeeper_passed': False,
-                'motor_rate': b1_motor_rate,
-                'wave_height': wave_height,
-                'sniper_go': False,
-                'sniper_node': '',
-                'status': 'gatekeeper_skipped',
-                'status_message': f"☕ Gatekeeper未達 (P1={max_p1:.1%} < {gatekeeper_th:.1%})",
-                'total_bet': 0,
-                'bets_count': 0
-            },
-            df_feat=df_feat,
-            df_race=df_race,
-            p1_dict_honmei=p1_dict_honmei,
-            all_odds=all_odds
-        )
-        return {
-            'status': 'gatekeeper_skipped',
-            'top_boat': top_boat,
-            'max_p1': max_p1
-        }
-        
-    logger.info(f"🎯 [{venue_name} {race_no}R] Gatekeeper 通過！ (P1 = {max_p1:.2%} ≧ {gatekeeper_th:.2%})")
+    gatekeeper_passed = (max_p1 >= gatekeeper_th)
 
     # 5.5 Sniper Filter (決定木マイクロクラスタ: Node 8, 9, 10)
     sniper_go = False
@@ -1527,50 +1487,7 @@ def evaluate_race(
         sniper_go = True
         sniper_node = "Node 8: 主力鉄板"
 
-    if not sniper_go:
-        logger.info(f"🎯 [{venue_name} {race_no}R] Sniper Filter: 条件未達のため投資スキップ (P1={max_p1:.2%}, Motor={b1_motor_rate:.1f}%, Wave={wave_height:.1f}cm) -> 見送り (No Bet)")
-        try:
-            db_manager.save_race_prediction(
-                race_id=race_id, race_date=date_str, venue_code=venue_code,
-                venue_name=venue_name, race_no=race_no, deadline_time=deadline_str,
-                top_boat=top_boat, max_p1=max_p1, prob_gap=prob_gap, gatekeeper_passed=True,
-                cluster_id=cluster_id, cluster_name=cluster_name, status="sniper_skipped",
-                source="auto"
-            )
-        except Exception: pass
-        
-        export_radar_state(
-            race_info=race_info,
-            ai_eval={
-                'p1_score': max_p1,
-                'top_boat': top_boat,
-                'prob_gap': prob_gap,
-                'gatekeeper_passed': True,
-                'motor_rate': b1_motor_rate,
-                'wave_height': wave_height,
-                'sniper_go': False,
-                'sniper_node': '',
-                'status': 'sniper_skipped',
-                'status_message': f"🎯 Sniper Filter見送り (P1={max_p1:.1%}, Motor={b1_motor_rate:.1f}%, Wave={wave_height:.1f}cm)",
-                'total_bet': 0,
-                'bets_count': 0
-            },
-            df_feat=df_feat,
-            df_race=df_race,
-            p1_dict_honmei=p1_dict_honmei,
-            all_odds=all_odds
-        )
-        return {
-            'status': 'sniper_skipped',
-            'top_boat': top_boat,
-            'max_p1': max_p1,
-            'b1_motor_rate': b1_motor_rate,
-            'wave_height': wave_height
-        }
-
-    logger.info(f"🎯 [{venue_name} {race_no}R] Sniper Filter 通過 [{sniper_node}] (P1={max_p1:.2%}, Motor={b1_motor_rate:.1f}%, Wave={wave_height:.1f}cm)! Extractor推論を実行します...")
-    
-    # 6. Extractor 推論 (Residual)
+    # 6. Extractor 推論 (Residual) - 見送り時でもメモリ上で全件計算を実行
     model_r = lgb.Booster(model_file=MODEL_RESIDUAL_PATH)
     df_r = prepare_features_for_model(df_feat, model_r)
     raw_res = model_r.predict(df_r, raw_score=True)
@@ -1588,7 +1505,7 @@ def evaluate_race(
     )
     benter_probs_dict = {p['combo']: p['prob'] for p in benter_probs}
     
-    # 的中特化（動的ダッチング）をメモリ上で計算 (Supabaseには保存せず、GUI表示用のみ)
+    # 8. 的中特化（動的ダッチング）をメモリ上で計算
     bets_hit_focused = {}
     if benter_probs_dict and all_odds:
         try:
@@ -1602,7 +1519,7 @@ def evaluate_race(
             )
         except Exception: pass
 
-    # 8. ポートフォリオ最適化 (SLSQP / 固定ウェイト 5%)
+    # 9. ポートフォリオ最適化 (SLSQP / 黄金ベースライン)
     optimizer = PortfolioOptimizer()
     bets = optimizer.optimize_funds(
         probabilities=benter_probs_dict,
@@ -1615,109 +1532,95 @@ def evaluate_race(
         max_odds=float(max_odds),
         kelly_fraction=None  # 固定ウェイト (レース上限5%, 買い目上限2%)
     )
-    
-    # 9. 結果判定 & Supabase永続化 & Discord通知
-    if not bets:
-        logger.info(f"🔍 [{venue_name} {race_no}R] Gatekeeper通過も、条件を満たすEV買い目なし (EV >= {min_ev:.2f}, Odds <= {max_odds:.1f}) -> 見送り")
-        try:
-            db_manager.save_race_prediction(
-                race_id=race_id, race_date=date_str, venue_code=venue_code,
-                venue_name=venue_name, race_no=race_no, deadline_time=deadline_str,
-                top_boat=top_boat, max_p1=max_p1, prob_gap=prob_gap, gatekeeper_passed=True,
-                cluster_id=cluster_id, cluster_name=cluster_name, status="no_value_bets",
-                source="auto"
-            )
-        except Exception: pass
-        
-        export_radar_state(
-            race_info=race_info,
-            ai_eval={
-                'p1_score': max_p1,
-                'top_boat': top_boat,
-                'prob_gap': prob_gap,
-                'gatekeeper_passed': True,
-                'motor_rate': b1_motor_rate,
-                'wave_height': wave_height,
-                'sniper_go': True,
-                'sniper_node': sniper_node,
-                'status': 'no_value_bets',
-                'status_message': f"🔍 EV条件未達見送り [{sniper_node}] (EV >= {min_ev:.2f} 買い目なし)",
-                'total_bet': 0,
-                'bets_count': 0
-            },
-            df_feat=df_feat,
-            df_race=df_race,
-            p1_dict_honmei=p1_dict_honmei,
-            all_odds=all_odds,
-            benter_probs_dict=benter_probs_dict,
-            bets={},
-            bets_hit_focused=bets_hit_focused
-        )
-        return {
-            'status': 'no_value_bets',
-            'top_boat': top_boat,
-            'max_p1': max_p1
-        }
-        
-    total_bet = sum(bets.values())
-    logger.info(f"🚀🚀🚀 [{venue_name} {race_no}R] 投資GOサイン点灯！ 推奨買い目: {len(bets)}点 / 総投資額: {total_bet:,}円")
-    
-    # Supabase へ推論結果および買い目を永続化
-    try:
-        db_manager.save_race_prediction(
-            race_id=race_id, race_date=date_str, venue_code=venue_code,
-            venue_name=venue_name, race_no=race_no, deadline_time=deadline_str,
-            top_boat=top_boat, max_p1=max_p1, prob_gap=prob_gap, gatekeeper_passed=True,
-            cluster_id=cluster_id, cluster_name=cluster_name, status="investment_go",
-            source="auto"
-        )
-        db_manager.save_recommended_bets(race_id, bets, benter_probs_dict, all_odds)
-    except Exception as e:
-        logger.error(f"Supabaseへの推論結果保存エラー: {e}")
-    
+
+    # 10. 判定ステータスと投資フラグの決定
+    if not gatekeeper_passed:
+        status = "gatekeeper_skipped"
+        status_message = f"☕ Gatekeeper未達 (P1={max_p1:.1%} < {gatekeeper_th:.1%})"
+        is_investment_go = False
+    elif not sniper_go:
+        status = "sniper_skipped"
+        status_message = f"🎯 Sniper Filter見送り (P1={max_p1:.1%}, Motor={b1_motor_rate:.1f}%, Wave={wave_height:.1f}cm)"
+        is_investment_go = False
+    elif not bets:
+        status = "no_value_bets"
+        status_message = f"🔍 EV条件未達見送り [{sniper_node}] (EV >= {min_ev:.2f} 買い目なし)"
+        is_investment_go = False
+    else:
+        status = "investment_go"
+        status_message = f"🚀 投資GOサイン点灯！ [{sniper_node}] ({len(bets)}点 / {sum(bets.values()):,}円)"
+        is_investment_go = True
+
+    # 11. ライブモニター用 JSON エクスポート (全レースで計算結果を出力)
     export_radar_state(
         race_info=race_info,
         ai_eval={
             'p1_score': max_p1,
             'top_boat': top_boat,
             'prob_gap': prob_gap,
-            'gatekeeper_passed': True,
+            'gatekeeper_passed': gatekeeper_passed,
             'motor_rate': b1_motor_rate,
             'wave_height': wave_height,
-            'sniper_go': True,
+            'sniper_go': sniper_go,
             'sniper_node': sniper_node,
-            'status': 'investment_go',
-            'status_message': f"🚀 投資GOサイン点灯！ [{sniper_node}] ({len(bets)}点 / {total_bet:,}円)",
-            'total_bet': total_bet,
-            'bets_count': len(bets)
+            'status': status,
+            'status_message': status_message,
+            'total_bet': sum(bets.values()) if is_investment_go else 0,
+            'bets_count': len(bets) if is_investment_go else 0
         },
         df_feat=df_feat,
         df_race=df_race,
         p1_dict_honmei=p1_dict_honmei,
         all_odds=all_odds,
         benter_probs_dict=benter_probs_dict,
-        bets=bets,
+        bets=bets if is_investment_go else {},
         bets_hit_focused=bets_hit_focused
     )
-    
-    send_discord_notification(
-        webhook_url=webhook_url,
-        date_str=date_str,
-        venue_code=venue_code,
-        venue_name=venue_name,
-        race_no=race_no,
-        deadline_str=deadline_str,
-        top_boat=top_boat,
-        max_p1=max_p1,
-        prob_gap=prob_gap,
-        cluster_id=cluster_id,
-        cluster_name=cluster_name,
-        bets=bets,
-        benter_probs=benter_probs_dict,
-        all_odds=all_odds,
-        bankroll=bankroll,
-        dry_run=dry_run
-    )
+
+    # 12. Supabase DB保存 & Discord通知
+    # 【重要】Sniper Filterを通過した投資GOの場合のみ実行！見送り時は絶対にDBに保存しない！
+    if is_investment_go:
+        total_bet = sum(bets.values())
+        logger.info(f"🚀🚀🚀 [{venue_name} {race_no}R] 投資GOサイン点灯！ 推奨買い目: {len(bets)}点 / 総投資額: {total_bet:,}円")
+        try:
+            db_manager.save_race_prediction(
+                race_id=race_id, race_date=date_str, venue_code=venue_code,
+                venue_name=venue_name, race_no=race_no, deadline_time=deadline_str,
+                top_boat=top_boat, max_p1=max_p1, prob_gap=prob_gap, gatekeeper_passed=True,
+                cluster_id=cluster_id, cluster_name=cluster_name, status="investment_go",
+                source="auto"
+            )
+            db_manager.save_recommended_bets(race_id, bets, benter_probs_dict, all_odds)
+        except Exception as e:
+            logger.error(f"Supabaseへの推論結果保存エラー: {e}")
+        
+        send_discord_notification(
+            webhook_url=webhook_url,
+            date_str=date_str,
+            venue_code=venue_code,
+            venue_name=venue_name,
+            race_no=race_no,
+            deadline_str=deadline_str,
+            top_boat=top_boat,
+            max_p1=max_p1,
+            prob_gap=prob_gap,
+            cluster_id=cluster_id,
+            cluster_name=cluster_name,
+            bets=bets,
+            benter_probs=benter_probs_dict,
+            all_odds=all_odds,
+            bankroll=bankroll,
+            dry_run=dry_run
+        )
+    else:
+        logger.info(f"[{venue_name} {race_no}R] {status_message} (インメモリ計算完了 -> DB保存なし)")
+
+    return {
+        'status': status,
+        'top_boat': top_boat,
+        'max_p1': max_p1,
+        'is_investment_go': is_investment_go
+    }
     
     return {
         'status': 'investment_go',
@@ -1952,30 +1855,7 @@ def evaluate_mock_race(
         'cluster_name': cluster_name
     }
 
-    if max_p1 < gatekeeper_th:
-        logger.info(f"☕ [MOCK] Gatekeeper 未達 (P1 = {max_p1:.2%} < {gatekeeper_th:.2%}) -> 見送り (No Bet)")
-        export_radar_state(
-            race_info=race_info,
-            ai_eval={
-                'p1_score': max_p1,
-                'top_boat': top_boat,
-                'prob_gap': prob_gap,
-                'gatekeeper_passed': False,
-                'motor_rate': b1_motor_rate,
-                'wave_height': wave_height,
-                'sniper_go': False,
-                'sniper_node': '',
-                'status': 'gatekeeper_skipped',
-                'status_message': f"☕ Gatekeeper未達 (P1={max_p1:.1%} < {gatekeeper_th:.1%})",
-                'total_bet': 0,
-                'bets_count': 0
-            },
-            df_feat=df_feat,
-            df_race=df_race,
-            p1_dict_honmei=p1_dict_honmei,
-            all_odds=all_odds
-        )
-        return {'status': 'gatekeeper_skipped', 'max_p1': max_p1}
+    gatekeeper_passed = (max_p1 >= gatekeeper_th)
 
     # Sniper Filter
     sniper_go = False
@@ -1990,34 +1870,7 @@ def evaluate_mock_race(
         sniper_go = True
         sniper_node = "Node 8: 主力鉄板"
 
-    if not sniper_go:
-        logger.info(f"🎯 [MOCK] Sniper Filter: 条件未達のため投資スキップ (P1={max_p1:.2%}, Motor={b1_motor_rate:.1f}%, Wave={wave_height:.1f}cm) -> 見送り (No Bet)")
-        export_radar_state(
-            race_info=race_info,
-            ai_eval={
-                'p1_score': max_p1,
-                'top_boat': top_boat,
-                'prob_gap': prob_gap,
-                'gatekeeper_passed': True,
-                'motor_rate': b1_motor_rate,
-                'wave_height': wave_height,
-                'sniper_go': False,
-                'sniper_node': '',
-                'status': 'sniper_skipped',
-                'status_message': f"🎯 Sniper Filter見送り (P1={max_p1:.1%}, Motor={b1_motor_rate:.1f}%, Wave={wave_height:.1f}cm)",
-                'total_bet': 0,
-                'bets_count': 0
-            },
-            df_feat=df_feat,
-            df_race=df_race,
-            p1_dict_honmei=p1_dict_honmei,
-            all_odds=all_odds
-        )
-        return {'status': 'sniper_skipped', 'max_p1': max_p1}
-
-    logger.info(f"🎯 [MOCK] Sniper Filter 通過 [{sniper_node}] (P1={max_p1:.2%}, Motor={b1_motor_rate:.1f}%, Wave={wave_height:.1f}cm)!")
-
-    # Extractor 推論
+    # Extractor 推論 (見送り時でもインメモリで全件計算)
     model_r = lgb.Booster(model_file=MODEL_RESIDUAL_PATH)
     df_r = prepare_features_for_model(df_feat, model_r)
     raw_res = model_r.predict(df_r, raw_score=True)
@@ -2035,7 +1888,7 @@ def evaluate_mock_race(
     )
     benter_probs_dict = {p['combo']: p['prob'] for p in benter_probs}
     
-    # 的中特化（動的ダッチング）をメモリ上で計算 (Supabaseには保存せず、GUI表示用のみ)
+    # 的中特化（動的ダッチング）をメモリ上で計算
     bets_hit_focused = {}
     if benter_probs_dict and all_odds:
         try:
@@ -2049,7 +1902,7 @@ def evaluate_mock_race(
             )
         except Exception: pass
 
-    # 最適化
+    # 最適化 (黄金ベースライン)
     optimizer = PortfolioOptimizer()
     bets = optimizer.optimize_funds(
         probabilities=benter_probs_dict,
@@ -2063,76 +1916,66 @@ def evaluate_mock_race(
         kelly_fraction=None
     )
     
-    total_bet = sum(bets.values()) if bets else 0
-    logger.info(f"🚀 [MOCK] 最適化選出買い目数: {len(bets)}点 / 投資総額: {total_bet:,}円")
-    
-    if not bets:
-        export_radar_state(
-            race_info=race_info,
-            ai_eval={
-                'p1_score': max_p1,
-                'top_boat': top_boat,
-                'prob_gap': prob_gap,
-                'gatekeeper_passed': True,
-                'motor_rate': b1_motor_rate,
-                'wave_height': wave_height,
-                'sniper_go': True,
-                'sniper_node': sniper_node,
-                'status': 'no_value_bets',
-                'status_message': f"🔍 EV条件未達見送り [{sniper_node}] (EV >= {min_ev:.2f} 買い目なし)",
-                'total_bet': 0,
-                'bets_count': 0
-            },
-            df_feat=df_feat,
-            df_race=df_race,
-            p1_dict_honmei=p1_dict_honmei,
-            all_odds=all_odds,
-            benter_probs_dict=benter_probs_dict,
-            bets={},
-            bets_hit_focused=bets_hit_focused
-        )
+    # 判定ステータスと投資フラグの決定
+    if not gatekeeper_passed:
+        status = "gatekeeper_skipped"
+        status_message = f"☕ [MOCK] Gatekeeper未達 (P1={max_p1:.1%} < {gatekeeper_th:.1%})"
+        is_investment_go = False
+    elif not sniper_go:
+        status = "sniper_skipped"
+        status_message = f"🎯 [MOCK] Sniper Filter見送り (P1={max_p1:.1%}, Motor={b1_motor_rate:.1f}%, Wave={wave_height:.1f}cm)"
+        is_investment_go = False
+    elif not bets:
+        status = "no_value_bets"
+        status_message = f"🔍 [MOCK] EV条件未達見送り [{sniper_node}] (EV >= {min_ev:.2f} 買い目なし)"
+        is_investment_go = False
     else:
-        export_radar_state(
-            race_info=race_info,
-            ai_eval={
-                'p1_score': max_p1,
-                'top_boat': top_boat,
-                'prob_gap': prob_gap,
-                'gatekeeper_passed': True,
-                'motor_rate': b1_motor_rate,
-                'wave_height': wave_height,
-                'sniper_go': True,
-                'sniper_node': sniper_node,
-                'status': 'investment_go',
-                'status_message': f"🚀 投資GOサイン点灯！ [{sniper_node}] ({len(bets)}点 / {total_bet:,}円)",
-                'total_bet': total_bet,
-                'bets_count': len(bets)
-            },
-            df_feat=df_feat,
-            df_race=df_race,
-            p1_dict_honmei=p1_dict_honmei,
-            all_odds=all_odds,
-            benter_probs_dict=benter_probs_dict,
-            bets=bets,
-            bets_hit_focused=bets_hit_focused
-        )
-    
-    # Supabase 保存
-    try:
-        db_manager.save_race_prediction(
-            race_id=race_id, race_date=date_str, venue_code=venue_code,
-            venue_name=v_name, race_no=race_no, deadline_time="15:25 (MOCK)",
-            top_boat=top_boat, max_p1=max_p1, prob_gap=prob_gap, gatekeeper_passed=True,
-            cluster_id=cluster_id, cluster_name=cluster_name, status="mock_investment_go",
-            source="auto"
-        )
+        status = "mock_investment_go"
+        status_message = f"🚀 [MOCK] 投資GOサイン点灯！ [{sniper_node}] ({len(bets)}点 / {sum(bets.values()):,}円)"
+        is_investment_go = True
 
-        if bets:
-            db_manager.save_recommended_bets(race_id, bets, benter_probs_dict, all_odds)
-    except Exception as e:
-        logger.warning(f"MOCK推論結果のDB保存例外: {e}")
+    total_bet = sum(bets.values()) if is_investment_go else 0
+    logger.info(f"{status_message} (選出買い目数: {len(bets) if is_investment_go else 0}点 / 投資総額: {total_bet:,}円)")
+
+    export_radar_state(
+        race_info=race_info,
+        ai_eval={
+            'p1_score': max_p1,
+            'top_boat': top_boat,
+            'prob_gap': prob_gap,
+            'gatekeeper_passed': gatekeeper_passed,
+            'motor_rate': b1_motor_rate,
+            'wave_height': wave_height,
+            'sniper_go': sniper_go,
+            'sniper_node': sniper_node,
+            'status': status,
+            'status_message': status_message,
+            'total_bet': total_bet,
+            'bets_count': len(bets) if is_investment_go else 0
+        },
+        df_feat=df_feat,
+        df_race=df_race,
+        p1_dict_honmei=p1_dict_honmei,
+        all_odds=all_odds,
+        benter_probs_dict=benter_probs_dict,
+        bets=bets if is_investment_go else {},
+        bets_hit_focused=bets_hit_focused
+    )
     
-    if bets:
+    # Supabase 保存 (投資GOの場合のみ)
+    if is_investment_go:
+        try:
+            db_manager.save_race_prediction(
+                race_id=race_id, race_date=date_str, venue_code=venue_code,
+                venue_name=v_name, race_no=race_no, deadline_time="15:25 (MOCK)",
+                top_boat=top_boat, max_p1=max_p1, prob_gap=prob_gap, gatekeeper_passed=True,
+                cluster_id=cluster_id, cluster_name=cluster_name, status="mock_investment_go",
+                source="auto"
+            )
+            db_manager.save_recommended_bets(race_id, bets, benter_probs_dict, all_odds)
+        except Exception as e:
+            logger.warning(f"MOCK推論結果のDB保存例外: {e}")
+        
         send_discord_notification(
             webhook_url=webhook_url,
             date_str=date_str,
@@ -2152,13 +1995,13 @@ def evaluate_mock_race(
             dry_run=dry_run
         )
     else:
-        logger.info("[MOCK] 最適化条件を満たす買い目が選出されなかったため、Discord送信は見送られました。")
+        logger.info(f"[MOCK] 見送りレースのため DB保存 & Discord送信 はスキップされました。")
         
     return {
-        'status': 'mock_success',
+        'status': status,
         'top_boat': top_boat,
         'max_p1': max_p1,
-        'bets': bets,
+        'bets': bets if is_investment_go else {},
         'total_bet': total_bet
     }
 
