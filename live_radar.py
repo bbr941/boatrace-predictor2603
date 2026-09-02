@@ -6,7 +6,7 @@ live_radar.py
     - 左: AI Radar (Gatekeeper P1 / Sniper判定 / 水面気象 / 投資サマリー)
     - 中: 出走表＆直前情報 (1〜6号艇の展示タイム、モーター率、チルト、ST等)
     - 右: 全体オッズ (市場オッズ人気上位30件)
-- 【下段: AI結論ビュー (40%)】
+- 【下段: AI結論ビュー (40%) - 左右50:50 グリッド分割】
     - 左: 🎯 黄金ベースライン (Sniper / EV重視 / 資金配分)
     - 右: 🛡️ 的中特化 (Dutching / 累積50% / トリガミ回避 / 利益均等化)
 """
@@ -47,7 +47,6 @@ class TabbedLiveDashboard(ctk.CTk):
         self.minsize(1100, 720)
 
         self.last_mtime = 0
-        self.active_tab_name = None
 
         # UI レイアウト構築
         self.build_shell_ui()
@@ -152,40 +151,52 @@ class TabbedLiveDashboard(ctk.CTk):
         self.after(1000, self.poll_radar_files)
 
     def update_all_tabs(self, races_list):
-        """最大5件のレースデータを元にタブビューを再生成/更新"""
+        """最大5件のレースデータ全件に対してタブを動的生成"""
         if not races_list:
             return
 
-        # 既存タブ名の取得
+        # 既存選択タブの退避
         current_selection = None
         try:
             current_selection = self.tabview.get()
         except Exception:
             pass
 
-        # 全タブを一度クリア
+        # 全タブを安全にクリア
         for tab_name in list(self.tabview._tab_dict.keys()):
-            self.tabview.delete(tab_name)
+            try:
+                self.tabview.delete(tab_name)
+            except Exception:
+                pass
 
         self.lbl_stock_count.configure(text=f"ストック: {len(races_list)} / 5 レース")
 
         first_tab_name = None
         target_tab_to_set = None
+        created_tab_titles = set()
 
+        # リスト内の全レースに対してタブを生成
         for idx, race_data in enumerate(races_list):
             race = race_data.get("race", {})
             v_name = race.get("venue_name") or race_data.get("venue_name", "会場")
             r_no = race.get("race_no") or race_data.get("race_no", idx + 1)
             deadline = race.get("deadline") or race_data.get("deadline", "--:--")
 
-            tab_title = f"{v_name} {r_no}R ({deadline})"
+            base_title = f"{v_name} {r_no}R ({deadline})"
+            tab_title = base_title
+            
+            # 重複防止フェイルセーフ (末尾に見えない空白を追加)
+            while tab_title in created_tab_titles:
+                tab_title += " "
+            created_tab_titles.add(tab_title)
+
             if first_tab_name is None:
                 first_tab_name = tab_title
 
-            if current_selection and tab_title == current_selection:
+            if current_selection and tab_title.strip() == current_selection.strip():
                 target_tab_to_set = tab_title
 
-            # タブ追加
+            # タブ追加 & 画面構築
             tab_frame = self.tabview.add(tab_title)
             self.build_single_race_view(tab_frame, race_data)
 
@@ -202,7 +213,7 @@ class TabbedLiveDashboard(ctk.CTk):
         self.lbl_footer_indicator.configure(text="🟢 リアルタイム監視中 (Live Connected)", text_color="#00E676")
 
     def build_single_race_view(self, parent_frame, data):
-        """1つのレースデータを【上段60% / 下段40%】の上下2段構成で描画"""
+        """1つのレースデータを【上段60% / 下段40%】の上下2段・確実なグリッド分割で描画"""
         race = data.get("race", {})
         ai = data.get("ai_eval", {})
         boats = data.get("boats", [])
@@ -210,17 +221,27 @@ class TabbedLiveDashboard(ctk.CTk):
         odds_golden = data.get("odds_golden") or data.get("odds", [])
         odds_hit = data.get("odds_hit_focused", [])
 
+        # 親フレームのグリッド設定 (上段 60% / 下段 40%)
+        parent_frame.grid_rowconfigure(0, weight=6)
+        parent_frame.grid_rowconfigure(1, weight=4)
+        parent_frame.grid_columnconfigure(0, weight=1)
+
         # =====================================================================
-        # 【上段：情報ビュー (約 60% / weight=6)】 - 3カラム
+        # 【上段：情報ビュー (60%)】 - 3カラム グリッド
         # =====================================================================
         top_frame = ctk.CTkFrame(parent_frame, fg_color="transparent")
-        top_frame.pack(fill="both", expand=True, padx=4, pady=(4, 2))
+        top_frame.grid(row=0, column=0, sticky="nsew", padx=4, pady=(4, 2))
+
+        top_frame.grid_rowconfigure(0, weight=1)
+        top_frame.grid_columnconfigure(0, weight=0, minsize=310)  # Radar
+        top_frame.grid_columnconfigure(1, weight=1)               # 出走表
+        top_frame.grid_columnconfigure(2, weight=0, minsize=340)  # 全体オッズ
 
         # ---------------------------------------------------------------------
-        # 上段-左カラム: AI Radar (幅: 約320px)
+        # 上段-左カラム: AI Radar
         # ---------------------------------------------------------------------
-        col_radar = ctk.CTkFrame(top_frame, width=320, corner_radius=8, fg_color="#1E1E26")
-        col_radar.pack(side="left", fill="both", padx=(0, 4), pady=0)
+        col_radar = ctk.CTkFrame(top_frame, width=310, corner_radius=8, fg_color="#1E1E26")
+        col_radar.grid(row=0, column=0, sticky="nsew", padx=(0, 4), pady=0)
         col_radar.pack_propagate(False)
 
         lbl_r_title = ctk.CTkLabel(col_radar, text="🛡️ AI Radar (評価 & 判定)", font=ctk.CTkFont(size=12, weight="bold"), text_color="#00E5FF")
@@ -296,10 +317,10 @@ class TabbedLiveDashboard(ctk.CTk):
         lbl_sum2.pack(anchor="w", padx=8, pady=(0, 4))
 
         # ---------------------------------------------------------------------
-        # 上段-中央カラム: 出走表＆直前情報 (幅: 約480px)
+        # 上段-中央カラム: 出走表＆直前情報
         # ---------------------------------------------------------------------
         col_boats = ctk.CTkFrame(top_frame, corner_radius=8, fg_color="#1E1E26")
-        col_boats.pack(side="left", fill="both", expand=True, padx=2, pady=0)
+        col_boats.grid(row=0, column=1, sticky="nsew", padx=2, pady=0)
 
         lbl_b_title = ctk.CTkLabel(col_boats, text="📋 出走表 & 直前展示タイム", font=ctk.CTkFont(size=12, weight="bold"), text_color="#00E5FF")
         lbl_b_title.pack(anchor="w", padx=10, pady=(6, 2))
@@ -361,10 +382,10 @@ class TabbedLiveDashboard(ctk.CTk):
                 lbl_p1.pack(side="left", padx=1)
 
         # ---------------------------------------------------------------------
-        # 上段-右カラム: 全体オッズ (人気順上位30件) (幅: 約340px)
+        # 上段-右カラム: 全体オッズ (人気順上位30件)
         # ---------------------------------------------------------------------
         col_all_odds = ctk.CTkFrame(top_frame, width=340, corner_radius=8, fg_color="#1E1E26")
-        col_all_odds.pack(side="left", fill="both", padx=(4, 0), pady=0)
+        col_all_odds.grid(row=0, column=2, sticky="nsew", padx=(4, 0), pady=0)
         col_all_odds.pack_propagate(False)
 
         lbl_ao_title = ctk.CTkLabel(col_all_odds, text="📊 全体オッズ (人気順上位30件)", font=ctk.CTkFont(size=12, weight="bold"), text_color="#00E5FF")
@@ -400,16 +421,20 @@ class TabbedLiveDashboard(ctk.CTk):
             lbl_none.pack(pady=15)
 
         # =====================================================================
-        # 【下段：AI結論ビュー (約 40% / weight=4)】 - 2カラム (黄金 vs 的中特化)
+        # 【下段：AI結論ビュー (40%)】 - 左右50:50 グリッド分割
         # =====================================================================
         bot_frame = ctk.CTkFrame(parent_frame, fg_color="transparent")
-        bot_frame.pack(fill="both", expand=True, padx=4, pady=(2, 4))
+        bot_frame.grid(row=1, column=0, sticky="nsew", padx=4, pady=(2, 4))
+
+        bot_frame.grid_rowconfigure(0, weight=1)
+        bot_frame.grid_columnconfigure(0, weight=1)
+        bot_frame.grid_columnconfigure(1, weight=1)
 
         # ---------------------------------------------------------------------
         # 下段-左カラム: 🎯 黄金ベースライン (Sniper / EV重視)
         # ---------------------------------------------------------------------
         col_golden = ctk.CTkFrame(bot_frame, corner_radius=8, fg_color="#1E1E26")
-        col_golden.pack(side="left", fill="both", expand=True, padx=(0, 3), pady=0)
+        col_golden.grid(row=0, column=0, sticky="nsew", padx=(0, 5), pady=0)
 
         top_bar_g = ctk.CTkFrame(col_golden, fg_color="transparent")
         top_bar_g.pack(fill="x", padx=8, pady=(6, 2))
@@ -423,8 +448,12 @@ class TabbedLiveDashboard(ctk.CTk):
         scroll_g = ctk.CTkScrollableFrame(col_golden, fg_color="#16161D", corner_radius=6)
         scroll_g.pack(fill="both", expand=True, padx=6, pady=(0, 6))
 
-        if odds_golden:
-            for o in odds_golden:
+        rec_golden_items = [o for o in odds_golden if o.get("is_recommended") or o.get("recommended_amount", 0) > 0]
+        other_golden_items = [o for o in odds_golden if not (o.get("is_recommended") or o.get("recommended_amount", 0) > 0)]
+        display_golden = rec_golden_items if rec_golden_items else other_golden_items
+
+        if display_golden and (rec_golden_items or status == "investment_go"):
+            for o in display_golden:
                 combo = o.get("combo", "")
                 odds_val = o.get("odds", 0.0)
                 prob_val = o.get("prob", 0.0)
@@ -458,14 +487,22 @@ class TabbedLiveDashboard(ctk.CTk):
                 lbl_s = ctk.CTkLabel(row2, text=sub_txt, font=ctk.CTkFont(size=10), text_color="#00E5FF" if is_rec else "#777777")
                 lbl_s.pack(side="left")
         else:
-            lbl_none_g = ctk.CTkLabel(scroll_g, text="黄金ベースライン買い目なし", font=ctk.CTkFont(size=10), text_color="#777777")
-            lbl_none_g.pack(pady=15)
+            # 見送りカード表示
+            no_bet_card = ctk.CTkFrame(scroll_g, corner_radius=6, fg_color="#181820")
+            no_bet_card.pack(fill="x", pady=10, padx=6)
+            lbl_no_bet = ctk.CTkLabel(
+                no_bet_card,
+                text="☕ 見送り (No Bet)\n条件を満たす高EV買い目が存在しないか、判定条件未達です",
+                font=ctk.CTkFont(size=11),
+                text_color="#888888"
+            )
+            lbl_no_bet.pack(pady=12, padx=10)
 
         # ---------------------------------------------------------------------
         # 下段-右カラム: 🛡️ 的中特化 (Dutching / 累積50%)
         # ---------------------------------------------------------------------
         col_hit = ctk.CTkFrame(bot_frame, corner_radius=8, fg_color="#1E1E26")
-        col_hit.pack(side="left", fill="both", expand=True, padx=(3, 0), pady=0)
+        col_hit.grid(row=0, column=1, sticky="nsew", padx=(5, 0), pady=0)
 
         top_bar_h = ctk.CTkFrame(col_hit, fg_color="transparent")
         top_bar_h.pack(fill="x", padx=8, pady=(6, 2))
@@ -479,8 +516,12 @@ class TabbedLiveDashboard(ctk.CTk):
         scroll_h = ctk.CTkScrollableFrame(col_hit, fg_color="#16161D", corner_radius=6)
         scroll_h.pack(fill="both", expand=True, padx=6, pady=(0, 6))
 
-        if odds_hit:
-            for o in odds_hit:
+        rec_hit_items = [o for o in odds_hit if o.get("is_recommended") or o.get("recommended_amount", 0) > 0]
+        other_hit_items = [o for o in odds_hit if not (o.get("is_recommended") or o.get("recommended_amount", 0) > 0)]
+        display_hit = rec_hit_items if rec_hit_items else other_hit_items
+
+        if display_hit and (rec_hit_items or tot_hit > 0):
+            for o in display_hit:
                 combo = o.get("combo", "")
                 odds_val = o.get("odds", 0.0)
                 prob_val = o.get("prob", 0.0)
@@ -514,8 +555,16 @@ class TabbedLiveDashboard(ctk.CTk):
                 lbl_s = ctk.CTkLabel(row2, text=sub_txt, font=ctk.CTkFont(size=10), text_color="#00E676" if is_rec else "#777777")
                 lbl_s.pack(side="left")
         else:
-            lbl_none_h = ctk.CTkLabel(scroll_h, text="的中特化データなし", font=ctk.CTkFont(size=10), text_color="#777777")
-            lbl_none_h.pack(pady=15)
+            # 見送りカード表示
+            no_hit_card = ctk.CTkFrame(scroll_h, corner_radius=6, fg_color="#181820")
+            no_hit_card.pack(fill="x", pady=10, padx=6)
+            lbl_no_hit = ctk.CTkLabel(
+                no_hit_card,
+                text="☕ 見送り (No Bet)\nダッチング対象買い目なし",
+                font=ctk.CTkFont(size=11),
+                text_color="#888888"
+            )
+            lbl_no_hit.pack(pady=12, padx=10)
 
 
 if __name__ == "__main__":
