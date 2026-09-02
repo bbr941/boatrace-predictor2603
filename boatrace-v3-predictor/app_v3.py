@@ -1019,7 +1019,11 @@ st.sidebar.title("🚤 BOATRACE AI Dual Quant")
 # 操作モード切替
 app_mode = st.sidebar.radio(
     "🧭 操作モード選択",
-    ["📊 自動運用ダッシュボード (Auto Dashboard)", "🎯 マニュアル推論 (Manual Mode)"],
+    [
+        "📊 自動運用ダッシュボード (Auto Dashboard)",
+        "🛡️ 的中特化パネル (Hit-Focused)",
+        "🎯 マニュアル推論 (Manual Mode)"
+    ],
     index=0
 )
 
@@ -1326,10 +1330,210 @@ if app_mode == "📊 自動運用ダッシュボード (Auto Dashboard)":
             st.write("配信ログはまだありません。")
 
 
+# =====================================================================
+# 4. Mode B: 🛡️ 的中特化パネル (Hit-Focused Panel - Official Grid View)
+# =====================================================================
+
+elif app_mode == "🛡️ 的中特化パネル (Hit-Focused)":
+    if "selected_hit_race" not in st.session_state:
+        st.session_state.selected_hit_race = None
+
+    # 詳細画面が選択されている場合
+    if st.session_state.selected_hit_race:
+        selected_race_id = st.session_state.selected_hit_race
+        detail = db_manager.get_hit_focused_race_detail(selected_race_id)
+        
+        if not detail:
+            st.warning(f"レースデータ ({selected_race_id}) が見つかりませんでした。")
+            if st.button("⬅️ 会場一覧に戻る", use_container_width=True):
+                st.session_state.selected_hit_race = None
+                st.rerun()
+        else:
+            col_back, col_space = st.columns([1.5, 4])
+            with col_back:
+                if st.button("⬅️ 会場一覧に戻る", use_container_width=True):
+                    st.session_state.selected_hit_race = None
+                    st.rerun()
+
+            vname = detail.get('venue_name', '会場')
+            rno = detail.get('race_no', 1)
+            dtime = detail.get('deadline_time', '--:--')
+            cname = detail.get('cluster_name', '標準水面')
+            cid = detail.get('cluster_id', 2)
+            p1 = detail.get('max_p1', 0.0) or 0.0
+            top_b = detail.get('top_boat', 1)
+            gap = detail.get('prob_gap', 0.0) or 0.0
+            tbet = detail.get('total_bet', 0) or 0
+            min_ret = detail.get('min_return', 0) or 0
+            max_ret = detail.get('max_return', 0) or 0
+            min_prof = detail.get('min_profit', 0) or 0
+            bets_list = detail.get('bets', [])
+
+            st.markdown(f"""
+            <div style="background: linear-gradient(135deg, rgba(0, 229, 255, 0.1), rgba(0, 150, 136, 0.03)); border: 1.5px solid #00E5FF; border-radius: 12px; padding: 16px 20px; margin-bottom: 16px;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <div style="font-size: 1.5em; font-weight: 700; color: #00E5FF;">
+                        🛡️ {vname} {rno}R 的中特化 AI分析詳細
+                    </div>
+                    <div style="font-size: 1.0em; color: #FFD600; font-weight: bold;">
+                        締切: {dtime}
+                    </div>
+                </div>
+                <div style="font-size: 0.9em; color: #B0BEC5; margin-top: 6px;">
+                    🏟️ <b>水面クラスタ:</b> {cname} (Cluster {cid}) &nbsp;|&nbsp; 
+                    🛡️ <b>Gatekeeper P1:</b> {p1:.1%} ({top_b}号艇本命 / 2位差: {gap:+.1%})
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            m1, m2, m3, m4 = st.columns(4)
+            with m1:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div style="font-size: 0.85em; color: #888;">🎯 推奨買い目数</div>
+                    <div style="font-size: 1.8em; font-weight: 700; color: #00E5FF;">{len(bets_list)} <span style="font-size:0.5em; font-weight:400;">点</span></div>
+                    <div style="font-size: 0.8em; color: #aaa; margin-top: 4px;">累積勝率 50% 抽出</div>
+                </div>
+                """, unsafe_allow_html=True)
+            with m2:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div style="font-size: 0.85em; color: #888;">💰 推奨投資総額</div>
+                    <div style="font-size: 1.8em; font-weight: 700; color: #FFFFFF;">{tbet:,} <span style="font-size:0.5em; font-weight:400;">円</span></div>
+                    <div style="font-size: 0.8em; color: #aaa; margin-top: 4px;">オッズ逆数比ダッチング</div>
+                </div>
+                """, unsafe_allow_html=True)
+            with m3:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div style="font-size: 0.85em; color: #888;">📈 見込払戻レンジ</div>
+                    <div style="font-size: 1.6em; font-weight: 700; color: #FFD600;">{min_ret:,} 〜 {max_ret:,} <span style="font-size:0.5em; font-weight:400;">円</span></div>
+                    <div style="font-size: 0.8em; color: #aaa; margin-top: 4px;">どの目が来ても利益均等化</div>
+                </div>
+                """, unsafe_allow_html=True)
+            with m4:
+                prof_color = "#00E676" if min_prof > 0 else "#FFFFFF"
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div style="font-size: 0.85em; color: #888;">💎 最低純利益 (トリガミ回避)</div>
+                    <div style="font-size: 1.8em; font-weight: 700; color: {prof_color};">{min_prof:+,} <span style="font-size:0.5em; font-weight:400;">円</span></div>
+                    <div style="font-size: 0.8em; color: #aaa; margin-top: 4px;">ガミり完全防止設計</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            st.markdown("---")
+
+            # 買い目一覧テーブル
+            st.markdown("### 📋 的中特化 買い目＆資金配分表 (動的ダッチング)")
+            if bets_list:
+                df_bets = pd.DataFrame(bets_list)[['combination', 'bet_amount', 'prob', 'odds', 'ev', 'expected_return', 'profit']]
+                df_bets.columns = ['買い目', '推奨投資額 (円)', '勝率 (Benter)', '実オッズ', 'EV (期待値)', '払戻見込 (円)', '純利益 (円)']
+                df_bets['推奨投資額 (円)'] = df_bets['推奨投資額 (円)'].apply(lambda x: f"{x:,} 円")
+                df_bets['勝率 (Benter)'] = df_bets['勝率 (Benter)'].apply(lambda x: f"{x:.2%}")
+                df_bets['実オッズ'] = df_bets['実オッズ'].apply(lambda x: f"{x:.1f} 倍" if x > 0 else "-")
+                df_bets['EV (期待値)'] = df_bets['EV (期待値)'].apply(lambda x: f"{x:.2f}")
+                df_bets['払戻見込 (円)'] = df_bets['払戻見込 (円)'].apply(lambda x: f"{x:,} 円" if x > 0 else "-")
+                df_bets['純利益 (円)'] = df_bets['純利益 (円)'].apply(lambda x: f"{x:+,} 円" if x != 0 else "0 円")
+                st.dataframe(df_bets, use_container_width=True, hide_index=True)
+            else:
+                st.info("このレースの買い目データはありません。")
+
+            # 公式出走表・展示タイム取得エキスパンダー
+            with st.expander("🚤 出走表・展示タイム (公式直前データ)"):
+                with st.spinner(f"{vname} {rno}R の公式出走データを取得中..."):
+                    try:
+                        date_pure = detail['race_date'].replace("-", "")
+                        df_r = BoatRaceScraper.get_race_data(date_pure, detail['venue_code'], detail['race_no'])
+                        if df_r is not None and not df_r.empty:
+                            cols_pref = ['boat_number', 'racer_name', 'motor_rate', 'boat_rate', 'exhibition_time', 'tilt', 'exhibition_start_timing']
+                            cols_exist = [c for c in cols_pref if c in df_r.columns]
+                            df_show = df_r[cols_exist].copy()
+                            df_show.rename(columns={
+                                'boat_number': '艇番',
+                                'racer_name': '選手名',
+                                'motor_rate': 'モーター2連率(%)',
+                                'boat_rate': 'ボート2連率(%)',
+                                'exhibition_time': '展示タイム',
+                                'tilt': 'チルト',
+                                'exhibition_start_timing': 'ST'
+                            }, inplace=True)
+                            st.dataframe(df_show, use_container_width=True, hide_index=True)
+                        else:
+                            st.write("出走表データは展示開始前または取得できませんでした。")
+                    except Exception as e:
+                        st.caption(f"出走表取得例外: {e}")
+
+    # 会場別グリッド一覧画面 (デフォルト)
+    else:
+        st.title("🛡️ 的中特化 全レースパネル (Official Grid View)")
+        st.caption("全レースの累積勝率50%抽出＆動的ダッチング（トリガミ自動回避）計算結果を公式アプリ風グリッドで一覧表示")
+
+        col_h1, col_h2, col_h3 = st.columns([2, 1, 1])
+        with col_h1:
+            today_date = datetime.date.today()
+            selected_hit_date = st.date_input("📅 開催日 (Date)", today_date, key="hit_panel_date")
+        with col_h2:
+            if st.button("🔄 最新データ更新", use_container_width=True):
+                st.rerun()
+        with col_h3:
+            if st.button("🧪 モック推論生成", help="テスト用の模擬的中特化レースを生成してDBへ保存します", use_container_width=True, key="btn_hit_mock"):
+                import auto_trader
+                with st.spinner("模擬レース推論を実行中..."):
+                    auto_trader.evaluate_mock_race(venue_code=18, race_no=10, dry_run=True)
+                st.success("テスト用モックレースを生成しました！")
+                st.rerun()
+
+        date_str_query = selected_hit_date.strftime('%Y%m%d')
+        hit_races = db_manager.get_hit_focused_races(date_str_query)
+
+        if not hit_races:
+            st.info(f"💡 {selected_hit_date.strftime('%Y年%m月%d日')} の的中特化データはまだありません。\n\n自動推論エンジン (`auto_trader.py`) が稼働すると、各レースの締切5分前に自動で蓄積されます。")
+        else:
+            # 会場ごとにグループ化
+            venues_dict = {}
+            for r in hit_races:
+                vcode = r['venue_code']
+                vname = r['venue_name']
+                key = (vcode, vname)
+                if key not in venues_dict:
+                    venues_dict[key] = []
+                venues_dict[key].append(r)
+
+            # 会場順にグリッド描画
+            for (vcode, vname), v_races in venues_dict.items():
+                cname = v_races[0].get('cluster_name', '標準水面') if v_races else '標準水面'
+                cid = v_races[0].get('cluster_id', 2) if v_races else 2
+                
+                st.markdown(f"""
+                <div style="background: rgba(255,255,255,0.03); border-left: 4px solid #00E5FF; padding: 6px 14px; border-radius: 4px; margin-top: 12px; margin-bottom: 8px;">
+                    <span style="font-size: 1.2em; font-weight: bold; color: #FFFFFF;">🏟️ {vname}</span>
+                    <span style="font-size: 0.85em; color: #888; margin-left: 10px;">(会場コード: {vcode:02d} / {cname})</span>
+                    <span style="font-size: 0.85em; color: #00E5FF; float: right;">蓄積: {len(v_races)} / 12 R</span>
+                </div>
+                """, unsafe_allow_html=True)
+
+                # 4カラムでボタンを配置 (1行4レース、最大3行)
+                for row_idx in range(0, len(v_races), 4):
+                    chunk = v_races[row_idx:row_idx+4]
+                    cols = st.columns(4)
+                    for c_idx, r_item in enumerate(chunk):
+                        with cols[c_idx]:
+                            r_no = r_item['race_no']
+                            d_time = r_item.get('deadline_time', '--:--')
+                            b_cnt = r_item.get('bets_count', 0)
+                            t_bet = r_item.get('total_bet', 0)
+                            min_p = r_item.get('min_profit', 0)
+                            
+                            btn_label = f"🏁 **{r_no}R** (締切 {d_time})\n\n🎯 {b_cnt}点 ({t_bet:,}円)\n\n利益: {min_p:+,}円"
+                            if st.button(btn_label, key=f"hit_grid_{r_item['race_id']}", use_container_width=True):
+                                st.session_state.selected_hit_race = r_item['race_id']
+                                st.rerun()
+                                
+                st.markdown("<br>", unsafe_allow_html=True)
+
 
 # =====================================================================
-# =====================================================================
-# 4. Mode B: 🎯 マニュアル推論 (Manual Mode)
+# 5. Mode C: 🎯 マニュアル推論 (Manual Mode)
 # =====================================================================
 
 else:

@@ -1577,7 +1577,32 @@ def evaluate_race(
         bets_hit_focused=bets_hit_focused
     )
 
-    # 12. Supabase DB保存 & Discord通知
+    # 11.5 【全レース蓄積】的中特化（ダッチング）データを専用DBテーブルへ常時保存
+    if bets_hit_focused:
+        try:
+            db_manager.save_hit_focused_prediction(
+                race_id=race_id,
+                race_date=date_str,
+                venue_code=venue_code,
+                venue_name=venue_name,
+                race_no=race_no,
+                deadline_time=deadline_str,
+                top_boat=top_boat,
+                max_p1=max_p1,
+                prob_gap=prob_gap,
+                cluster_id=cluster_id,
+                cluster_name=cluster_name,
+                status=status,
+                bets=bets_hit_focused,
+                benter_probs=benter_probs_dict,
+                all_odds=all_odds,
+                target_cum_prob=0.50
+            )
+            logger.info(f"💾 [{venue_name} {race_no}R] 的中特化データを hit_focused_predictions に自動蓄積保存しました ({len(bets_hit_focused)}点 / {sum(bets_hit_focused.values()):,}円)")
+        except Exception as e:
+            logger.warning(f"的中特化データの保存エラー: {e}")
+
+    # 12. Supabase DB保存 & Discord通知 (黄金ベースライン / 投資GOのみ)
     # 【重要】Sniper Filterを通過した投資GOの場合のみ実行！見送り時は絶対にDBに保存しない！
     if is_investment_go:
         total_bet = sum(bets.values())
@@ -1613,21 +1638,13 @@ def evaluate_race(
             dry_run=dry_run
         )
     else:
-        logger.info(f"[{venue_name} {race_no}R] {status_message} (インメモリ計算完了 -> DB保存なし)")
+        logger.info(f"[{venue_name} {race_no}R] {status_message} (インメモリ計算完了 -> race_predictions 保存なし)")
 
     return {
         'status': status,
         'top_boat': top_boat,
         'max_p1': max_p1,
         'is_investment_go': is_investment_go
-    }
-    
-    return {
-        'status': 'investment_go',
-        'top_boat': top_boat,
-        'max_p1': max_p1,
-        'bets': bets,
-        'total_bet': total_bet
     }
 
 
@@ -1961,6 +1978,31 @@ def evaluate_mock_race(
         bets=bets if is_investment_go else {},
         bets_hit_focused=bets_hit_focused
     )
+
+    # 的中特化データを専用DBテーブルへ自動蓄積保存
+    if bets_hit_focused:
+        try:
+            db_manager.save_hit_focused_prediction(
+                race_id=race_id,
+                race_date=date_str,
+                venue_code=venue_code,
+                venue_name=v_name,
+                race_no=race_no,
+                deadline_time="15:25 (MOCK)",
+                top_boat=top_boat,
+                max_p1=max_p1,
+                prob_gap=prob_gap,
+                cluster_id=cluster_id,
+                cluster_name=cluster_name,
+                status=status,
+                bets=bets_hit_focused,
+                benter_probs=benter_probs_dict,
+                all_odds=all_odds,
+                target_cum_prob=0.50
+            )
+            logger.info(f"💾 [MOCK] 的中特化データを hit_focused_predictions に自動蓄積保存しました ({len(bets_hit_focused)}点 / {sum(bets_hit_focused.values()):,}円)")
+        except Exception as e:
+            logger.warning(f"MOCK的中特化データの保存エラー: {e}")
     
     # Supabase 保存 (投資GOの場合のみ)
     if is_investment_go:
