@@ -302,18 +302,25 @@ class BoatRaceScraper:
 
         boat_before = {}
         try:
-            # 展示タイムパース
+            # 展示タイム & チルト パース
             for i, tb in enumerate(soup_before.select("table.is-w748 tbody")):
                 tds = tb.select("td")
                 ex_val = None
+                tilt_val = -0.5
                 if len(tds) >= 5:
                     txt = tds[4].get_text(strip=True)
                     if txt and txt != '\xa0':
                         try: ex_val = float(re.search(r'([\d\.]+)', txt).group(1))
                         except Exception: pass
+                if len(tds) >= 6:
+                    txt_t = tds[5].get_text(strip=True)
+                    if txt_t and txt_t != '\xa0':
+                        try: tilt_val = float(re.search(r'([-\+]?[\d\.]+)', txt_t).group(1))
+                        except Exception: pass
                 if ex_val is not None:
                     if (i+1) not in boat_before: boat_before[i+1] = {}
                     boat_before[i+1]['ex_time'] = ex_val
+                    boat_before[i+1]['tilt'] = tilt_val
             
             # STパース
             for idx, row in enumerate(soup_before.select("table.is-w238 tbody tr")):
@@ -425,6 +432,7 @@ class BoatRaceScraper:
                     'exhibition_time': boat_before[bn]['ex_time'],
                     'exhibition_start_timing': boat_before.get(bn, {}).get('st', 0.20),
                     'pred_course': boat_before.get(bn, {}).get('pred_course', bn),
+                    'tilt': boat_before.get(bn, {}).get('tilt', -0.5),
                     'wind_direction': weather['wind_direction'],
                     'wind_speed': weather['wind_speed'],
                     'wave_height': weather['wave_height'],
@@ -1054,14 +1062,131 @@ def send_discord_notification(
 # 4. 黄金ベースライン レース評価エンジン
 # =====================================================================
 
-def export_radar_state(data: Dict[str, Any]) -> None:
-    """最新の推論・評価状態を current_radar.json に上書き出力"""
+def export_radar_state(
+    race_info: Dict[str, Any],
+    ai_eval: Dict[str, Any],
+    df_feat: Optional[pd.DataFrame] = None,
+    df_race: Optional[pd.DataFrame] = None,
+    p1_dict_honmei: Optional[Dict[int, float]] = None,
+    all_odds: Optional[Dict[str, float]] = None,
+    benter_probs_dict: Optional[Dict[str, float]] = None,
+    bets: Optional[Dict[str, int]] = None
+) -> None:
+    """最新の推論・全評価状態を階層構造の current_radar.json に上書き出力"""
     try:
         radar_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'current_radar.json')
-        if 'updated_at' not in data:
-            data['updated_at'] = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        # 1. 出走表 & 直前情報（1〜6号艇）の構築
+        boats_list = []
+        for bn in range(1, 7):
+            b_dict = {
+                'boat_number': bn,
+                'racer_id': 0,
+                'racer_name': f"{bn}号艇",
+                'motor_rate': 0.0,
+                'boat_rate': 0.0,
+                'ex_time': 0.0,
+                'tilt': -0.5,
+                'st_time': 0.20,
+                'pred_course': bn,
+                'ex_momentum_diff': 0.0,
+                'p1_prob': float(p1_dict_honmei.get(bn, 0.0)) if p1_dict_honmei else 0.0
+            }
+
+            source_df = df_feat if (df_feat is not None and not df_feat.empty) else df_race
+            if source_df is not None and not source_df.empty:
+                b_match = source_df[source_df['boat_number'] == bn]
+                if len(b_match) > 0:
+                    row = b_match.iloc[0]
+                    if 'racer_id' in row and pd.notna(row['racer_id']):
+                        b_dict['racer_id'] = int(row['racer_id'])
+                    if 'racer_name' in row and pd.notna(row['racer_name']):
+                        b_dict['racer_name'] = str(row['racer_name'])
+                    if 'motor_rate' in row and pd.notna(row['motor_rate']):
+                        b_dict['motor_rate'] = float(row['motor_rate'])
+                    if 'boat_rate' in row and pd.notna(row['boat_rate']):
+                        b_dict['boat_rate'] = float(row['boat_rate'])
+                    if 'exhibition_time' in row and pd.notna(row['exhibition_time']):
+                        b_dict['ex_time'] = float(row['exhibition_time'])
+                    if 'tilt' in row and pd.notna(row['tilt']):
+                        b_dict['tilt'] = float(row['tilt'])
+                    if 'exhibition_start_timing' in row and pd.notna(row['exhibition_start_timing']):
+                        b_dict['st_time'] = float(row['exhibition_start_timing'])
+                    if 'pred_course' in row and pd.notna(row['pred_course']):
+                        b_dict['pred_course'] = int(row['pred_course'])
+                    if 'ex_momentum_diff' in row and pd.notna(row['ex_momentum_diff']):
+                        b_dict['ex_momentum_diff'] = float(row['ex_momentum_diff'])
+
+            boats_list.append(b_dict)
+
+        # 2. オッズ & EV 候補リストの構築
+        odds_list = []
+        if all_odds:
+            candidate_combos = []
+            if benter_probs_dict:
+                for combo, prob in benter_probs_dict.items():
+                    o_val = all_odds.get(combo, 0.0)
+                    ev_val = prob * o_val
+                    rec_amt = bets.get(combo, 0) if bets else 0
+                    candidate_combos.append({
+                        'combo': combo,
+                        'odds': o_val,
+                        'prob': prob,
+                        'ev': ev_val,
+                        'recommended_amount': rec_amt,
+                        'expected_return': int((rec_amt / 100.0) * o_val * 100.0) if rec_amt > 0 else 0,
+                        'is_recommended': rec_amt > 0
+                    })
+                candidate_combos.sort(key=lambda x: (x['is_recommended'], x['ev']), reverse=True)
+                odds_list = candidate_combos[:15]
+            else:
+                for combo, o_val in sorted(all_odds.items(), key=lambda x: x[1])[:10]:
+                    odds_list.append({
+                        'combo': combo,
+                        'odds': o_val,
+                        'prob': 0.0,
+                        'ev': 0.0,
+                        'recommended_amount': 0,
+                        'expected_return': 0,
+                        'is_recommended': False
+                    })
+
+        payload = {
+            'race': race_info,
+            'ai_eval': ai_eval,
+            'boats': boats_list,
+            'odds': odds_list,
+            # フラット互換
+            'race_name': race_info.get('race_name', ''),
+            'venue_name': race_info.get('venue_name', ''),
+            'race_no': race_info.get('race_no', 0),
+            'deadline': race_info.get('deadline', ''),
+            'p1_score': ai_eval.get('p1_score', 0.0),
+            'top_boat': ai_eval.get('top_boat', 1),
+            'gatekeeper_passed': ai_eval.get('gatekeeper_passed', False),
+            'motor_rate': ai_eval.get('motor_rate', 0.0),
+            'wave_height': ai_eval.get('wave_height', 0.0),
+            'sniper_go': ai_eval.get('sniper_go', False),
+            'sniper_node': ai_eval.get('sniper_node', ''),
+            'status': ai_eval.get('status', ''),
+            'status_message': ai_eval.get('status_message', ''),
+            'total_bet': ai_eval.get('total_bet', 0),
+            'bets_count': ai_eval.get('bets_count', 0),
+            'bets': [
+                {
+                    'combo': o['combo'],
+                    'amount': o['recommended_amount'],
+                    'odds': o['odds'],
+                    'ev': o['ev'],
+                    'expected_return': o['expected_return']
+                }
+                for o in odds_list if o.get('is_recommended')
+            ],
+            'updated_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+
         with open(radar_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            json.dump(payload, f, ensure_ascii=False, indent=2)
     except Exception as e:
         logger.debug(f"current_radar.json 出力例外: {e}")
 
@@ -1086,8 +1211,20 @@ def evaluate_race(
     指定レースの直前オッズ・出走データを取得し、黄金ベースライン推論を実行
     """
     race_id = f"{date_str}_{venue_code}_{race_no}"
-    logger.info(f"🔍 [EVALUATING] {venue_name} {race_no}R (締切: {deadline_str}) の分析を開始...")
+    race_name = f"{venue_name} {race_no}R"
+    logger.info(f"🔍 [EVALUATING] {race_name} (締切: {deadline_str}) の分析を開始...")
     
+    cluster_d2, cluster_d3, cluster_id, cluster_name = get_cluster_benter_params(venue_code)
+    race_info = {
+        'race_name': race_name,
+        'venue_name': venue_name,
+        'venue_code': venue_code,
+        'race_no': race_no,
+        'deadline': deadline_str,
+        'cluster_id': cluster_id,
+        'cluster_name': cluster_name
+    }
+
     # 1. 難水面（Cluster 1）即時除外ガード
     if venue_code in CLUSTER_1_VENUES:
         logger.info(f"🛑 [SKIP] {venue_name} (会場コード: {venue_code:02d}) は難水面 (Cluster 1) のためシステム保護によりスキップします。")
@@ -1100,24 +1237,23 @@ def evaluate_race(
                 source="auto"
             )
         except Exception: pass
-        export_radar_state({
-            'race_name': f"{venue_name} {race_no}R",
-            'venue_name': venue_name,
-            'race_no': race_no,
-            'deadline': deadline_str,
-            'p1_score': 0.0,
-            'top_boat': 1,
-            'gatekeeper_passed': False,
-            'motor_rate': 0.0,
-            'wave_height': 0.0,
-            'sniper_go': False,
-            'sniper_node': '',
-            'status': 'skipped_cluster1',
-            'status_message': f"🛑 難水面システム除外 ({venue_name}: Cluster 1)",
-            'total_bet': 0,
-            'bets_count': 0,
-            'bets': []
-        })
+        
+        export_radar_state(
+            race_info=race_info,
+            ai_eval={
+                'p1_score': 0.0,
+                'top_boat': 1,
+                'gatekeeper_passed': False,
+                'motor_rate': 0.0,
+                'wave_height': 0.0,
+                'sniper_go': False,
+                'sniper_node': '',
+                'status': 'skipped_cluster1',
+                'status_message': f"🛑 難水面システム除外 ({venue_name}: Cluster 1)",
+                'total_bet': 0,
+                'bets_count': 0
+            }
+        )
         return {'status': 'skipped_cluster1'}
         
     # 2. 出走データ & 直前オッズスクレイピング
@@ -1184,8 +1320,6 @@ def evaluate_race(
     top_boat, max_p1 = sorted_p1[0]
     prob_gap = (max_p1 - sorted_p1[1][1]) if len(sorted_p1) > 1 else 0.0
     
-    cluster_d2, cluster_d3, cluster_id, cluster_name = get_cluster_benter_params(venue_code)
-    
     logger.info(f"🛡️ [{venue_name} {race_no}R] Gatekeeper P1 = {max_p1:.2%} ({top_boat}号艇本命 / 閾値: {gatekeeper_th:.2%})")
     
     b1_feat = df_feat[df_feat['boat_number'] == 1]
@@ -1204,24 +1338,28 @@ def evaluate_race(
                 source="auto"
             )
         except Exception: pass
-        export_radar_state({
-            'race_name': f"{venue_name} {race_no}R",
-            'venue_name': venue_name,
-            'race_no': race_no,
-            'deadline': deadline_str,
-            'p1_score': max_p1,
-            'top_boat': top_boat,
-            'gatekeeper_passed': False,
-            'motor_rate': b1_motor_rate,
-            'wave_height': wave_height,
-            'sniper_go': False,
-            'sniper_node': '',
-            'status': 'gatekeeper_skipped',
-            'status_message': f"☕ Gatekeeper未達 (P1={max_p1:.1%} < {gatekeeper_th:.1%})",
-            'total_bet': 0,
-            'bets_count': 0,
-            'bets': []
-        })
+        
+        export_radar_state(
+            race_info=race_info,
+            ai_eval={
+                'p1_score': max_p1,
+                'top_boat': top_boat,
+                'prob_gap': prob_gap,
+                'gatekeeper_passed': False,
+                'motor_rate': b1_motor_rate,
+                'wave_height': wave_height,
+                'sniper_go': False,
+                'sniper_node': '',
+                'status': 'gatekeeper_skipped',
+                'status_message': f"☕ Gatekeeper未達 (P1={max_p1:.1%} < {gatekeeper_th:.1%})",
+                'total_bet': 0,
+                'bets_count': 0
+            },
+            df_feat=df_feat,
+            df_race=df_race,
+            p1_dict_honmei=p1_dict_honmei,
+            all_odds=all_odds
+        )
         return {
             'status': 'gatekeeper_skipped',
             'top_boat': top_boat,
@@ -1255,24 +1393,28 @@ def evaluate_race(
                 source="auto"
             )
         except Exception: pass
-        export_radar_state({
-            'race_name': f"{venue_name} {race_no}R",
-            'venue_name': venue_name,
-            'race_no': race_no,
-            'deadline': deadline_str,
-            'p1_score': max_p1,
-            'top_boat': top_boat,
-            'gatekeeper_passed': True,
-            'motor_rate': b1_motor_rate,
-            'wave_height': wave_height,
-            'sniper_go': False,
-            'sniper_node': '',
-            'status': 'sniper_skipped',
-            'status_message': f"🎯 Sniper Filter見送り (P1={max_p1:.1%}, Motor={b1_motor_rate:.1f}%, Wave={wave_height:.1f}cm)",
-            'total_bet': 0,
-            'bets_count': 0,
-            'bets': []
-        })
+        
+        export_radar_state(
+            race_info=race_info,
+            ai_eval={
+                'p1_score': max_p1,
+                'top_boat': top_boat,
+                'prob_gap': prob_gap,
+                'gatekeeper_passed': True,
+                'motor_rate': b1_motor_rate,
+                'wave_height': wave_height,
+                'sniper_go': False,
+                'sniper_node': '',
+                'status': 'sniper_skipped',
+                'status_message': f"🎯 Sniper Filter見送り (P1={max_p1:.1%}, Motor={b1_motor_rate:.1f}%, Wave={wave_height:.1f}cm)",
+                'total_bet': 0,
+                'bets_count': 0
+            },
+            df_feat=df_feat,
+            df_race=df_race,
+            p1_dict_honmei=p1_dict_honmei,
+            all_odds=all_odds
+        )
         return {
             'status': 'sniper_skipped',
             'top_boat': top_boat,
@@ -1327,24 +1469,30 @@ def evaluate_race(
                 source="auto"
             )
         except Exception: pass
-        export_radar_state({
-            'race_name': f"{venue_name} {race_no}R",
-            'venue_name': venue_name,
-            'race_no': race_no,
-            'deadline': deadline_str,
-            'p1_score': max_p1,
-            'top_boat': top_boat,
-            'gatekeeper_passed': True,
-            'motor_rate': b1_motor_rate,
-            'wave_height': wave_height,
-            'sniper_go': True,
-            'sniper_node': sniper_node,
-            'status': 'no_value_bets',
-            'status_message': f"🔍 EV条件未達見送り [{sniper_node}] (EV >= {min_ev:.2f} 買い目なし)",
-            'total_bet': 0,
-            'bets_count': 0,
-            'bets': []
-        })
+        
+        export_radar_state(
+            race_info=race_info,
+            ai_eval={
+                'p1_score': max_p1,
+                'top_boat': top_boat,
+                'prob_gap': prob_gap,
+                'gatekeeper_passed': True,
+                'motor_rate': b1_motor_rate,
+                'wave_height': wave_height,
+                'sniper_go': True,
+                'sniper_node': sniper_node,
+                'status': 'no_value_bets',
+                'status_message': f"🔍 EV条件未達見送り [{sniper_node}] (EV >= {min_ev:.2f} 買い目なし)",
+                'total_bet': 0,
+                'bets_count': 0
+            },
+            df_feat=df_feat,
+            df_race=df_race,
+            p1_dict_honmei=p1_dict_honmei,
+            all_odds=all_odds,
+            benter_probs_dict=benter_probs_dict,
+            bets={}
+        )
         return {
             'status': 'no_value_bets',
             'top_boat': top_boat,
@@ -1367,33 +1515,29 @@ def evaluate_race(
     except Exception as e:
         logger.error(f"Supabaseへの推論結果保存エラー: {e}")
     
-    export_radar_state({
-        'race_name': f"{venue_name} {race_no}R",
-        'venue_name': venue_name,
-        'race_no': race_no,
-        'deadline': deadline_str,
-        'p1_score': max_p1,
-        'top_boat': top_boat,
-        'gatekeeper_passed': True,
-        'motor_rate': b1_motor_rate,
-        'wave_height': wave_height,
-        'sniper_go': True,
-        'sniper_node': sniper_node,
-        'status': 'investment_go',
-        'status_message': f"🚀 投資GOサイン点灯！ [{sniper_node}] ({len(bets)}点 / {total_bet:,}円)",
-        'total_bet': total_bet,
-        'bets_count': len(bets),
-        'bets': [
-            {
-                'combo': c,
-                'amount': amt,
-                'odds': all_odds.get(c, 0.0),
-                'ev': benter_probs_dict.get(c, 0.0) * all_odds.get(c, 0.0),
-                'expected_return': int((amt / 100.0) * all_odds.get(c, 0.0) * 100.0)
-            }
-            for c, amt in bets.items()
-        ]
-    })
+    export_radar_state(
+        race_info=race_info,
+        ai_eval={
+            'p1_score': max_p1,
+            'top_boat': top_boat,
+            'prob_gap': prob_gap,
+            'gatekeeper_passed': True,
+            'motor_rate': b1_motor_rate,
+            'wave_height': wave_height,
+            'sniper_go': True,
+            'sniper_node': sniper_node,
+            'status': 'investment_go',
+            'status_message': f"🚀 投資GOサイン点灯！ [{sniper_node}] ({len(bets)}点 / {total_bet:,}円)",
+            'total_bet': total_bet,
+            'bets_count': len(bets)
+        },
+        df_feat=df_feat,
+        df_race=df_race,
+        p1_dict_honmei=p1_dict_honmei,
+        all_odds=all_odds,
+        benter_probs_dict=benter_probs_dict,
+        bets=bets
+    )
     
     send_discord_notification(
         webhook_url=webhook_url,
@@ -1636,26 +1780,40 @@ def evaluate_mock_race(
     b1_motor_rate = float(b1_feat['motor_rate'].iloc[0]) if (len(b1_feat) > 0 and 'motor_rate' in b1_feat.columns and pd.notna(b1_feat['motor_rate'].iloc[0])) else 0.0
     wave_height = float(df_feat['wave_height'].iloc[0]) if ('wave_height' in df_feat.columns and pd.notna(df_feat['wave_height'].iloc[0])) else 0.0
 
+    cluster_d2, cluster_d3, cluster_id, cluster_name = get_cluster_benter_params(venue_code)
+    race_info = {
+        'race_name': f"{v_name} {race_no}R (MOCK)",
+        'venue_name': v_name,
+        'venue_code': venue_code,
+        'race_no': race_no,
+        'deadline': "15:25 (MOCK)",
+        'cluster_id': cluster_id,
+        'cluster_name': cluster_name
+    }
+
     if max_p1 < gatekeeper_th:
         logger.info(f"☕ [MOCK] Gatekeeper 未達 (P1 = {max_p1:.2%} < {gatekeeper_th:.2%}) -> 見送り (No Bet)")
-        export_radar_state({
-            'race_name': f"{v_name} {race_no}R (MOCK)",
-            'venue_name': v_name,
-            'race_no': race_no,
-            'deadline': "15:25 (MOCK)",
-            'p1_score': max_p1,
-            'top_boat': top_boat,
-            'gatekeeper_passed': False,
-            'motor_rate': b1_motor_rate,
-            'wave_height': wave_height,
-            'sniper_go': False,
-            'sniper_node': '',
-            'status': 'gatekeeper_skipped',
-            'status_message': f"☕ Gatekeeper未達 (P1={max_p1:.1%} < {gatekeeper_th:.1%})",
-            'total_bet': 0,
-            'bets_count': 0,
-            'bets': []
-        })
+        export_radar_state(
+            race_info=race_info,
+            ai_eval={
+                'p1_score': max_p1,
+                'top_boat': top_boat,
+                'prob_gap': prob_gap,
+                'gatekeeper_passed': False,
+                'motor_rate': b1_motor_rate,
+                'wave_height': wave_height,
+                'sniper_go': False,
+                'sniper_node': '',
+                'status': 'gatekeeper_skipped',
+                'status_message': f"☕ Gatekeeper未達 (P1={max_p1:.1%} < {gatekeeper_th:.1%})",
+                'total_bet': 0,
+                'bets_count': 0
+            },
+            df_feat=df_feat,
+            df_race=df_race,
+            p1_dict_honmei=p1_dict_honmei,
+            all_odds=all_odds
+        )
         return {'status': 'gatekeeper_skipped', 'max_p1': max_p1}
 
     # Sniper Filter
@@ -1673,24 +1831,27 @@ def evaluate_mock_race(
 
     if not sniper_go:
         logger.info(f"🎯 [MOCK] Sniper Filter: 条件未達のため投資スキップ (P1={max_p1:.2%}, Motor={b1_motor_rate:.1f}%, Wave={wave_height:.1f}cm) -> 見送り (No Bet)")
-        export_radar_state({
-            'race_name': f"{v_name} {race_no}R (MOCK)",
-            'venue_name': v_name,
-            'race_no': race_no,
-            'deadline': "15:25 (MOCK)",
-            'p1_score': max_p1,
-            'top_boat': top_boat,
-            'gatekeeper_passed': True,
-            'motor_rate': b1_motor_rate,
-            'wave_height': wave_height,
-            'sniper_go': False,
-            'sniper_node': '',
-            'status': 'sniper_skipped',
-            'status_message': f"🎯 Sniper Filter見送り (P1={max_p1:.1%}, Motor={b1_motor_rate:.1f}%, Wave={wave_height:.1f}cm)",
-            'total_bet': 0,
-            'bets_count': 0,
-            'bets': []
-        })
+        export_radar_state(
+            race_info=race_info,
+            ai_eval={
+                'p1_score': max_p1,
+                'top_boat': top_boat,
+                'prob_gap': prob_gap,
+                'gatekeeper_passed': True,
+                'motor_rate': b1_motor_rate,
+                'wave_height': wave_height,
+                'sniper_go': False,
+                'sniper_node': '',
+                'status': 'sniper_skipped',
+                'status_message': f"🎯 Sniper Filter見送り (P1={max_p1:.1%}, Motor={b1_motor_rate:.1f}%, Wave={wave_height:.1f}cm)",
+                'total_bet': 0,
+                'bets_count': 0
+            },
+            df_feat=df_feat,
+            df_race=df_race,
+            p1_dict_honmei=p1_dict_honmei,
+            all_odds=all_odds
+        )
         return {'status': 'sniper_skipped', 'max_p1': max_p1}
 
     logger.info(f"🎯 [MOCK] Sniper Filter 通過 [{sniper_node}] (P1={max_p1:.2%}, Motor={b1_motor_rate:.1f}%, Wave={wave_height:.1f}cm)!")
@@ -1705,7 +1866,6 @@ def evaluate_mock_race(
     p1_dict_residual = dict(zip(df_feat['boat_number'], p_norm_res))
     
     # Benter 展開
-    cluster_d2, cluster_d3, cluster_id, cluster_name = get_cluster_benter_params(venue_code)
     benter_probs, _, _ = calculate_benter_probs(
         p1_dict_residual,
         d2=cluster_d2,
@@ -1732,52 +1892,53 @@ def evaluate_mock_race(
     logger.info(f"🚀 [MOCK] 最適化選出買い目数: {len(bets)}点 / 投資総額: {total_bet:,}円")
     
     if not bets:
-        export_radar_state({
-            'race_name': f"{v_name} {race_no}R (MOCK)",
-            'venue_name': v_name,
-            'race_no': race_no,
-            'deadline': "15:25 (MOCK)",
-            'p1_score': max_p1,
-            'top_boat': top_boat,
-            'gatekeeper_passed': True,
-            'motor_rate': b1_motor_rate,
-            'wave_height': wave_height,
-            'sniper_go': True,
-            'sniper_node': sniper_node,
-            'status': 'no_value_bets',
-            'status_message': f"🔍 EV条件未達見送り [{sniper_node}] (EV >= {min_ev:.2f} 買い目なし)",
-            'total_bet': 0,
-            'bets_count': 0,
-            'bets': []
-        })
+        export_radar_state(
+            race_info=race_info,
+            ai_eval={
+                'p1_score': max_p1,
+                'top_boat': top_boat,
+                'prob_gap': prob_gap,
+                'gatekeeper_passed': True,
+                'motor_rate': b1_motor_rate,
+                'wave_height': wave_height,
+                'sniper_go': True,
+                'sniper_node': sniper_node,
+                'status': 'no_value_bets',
+                'status_message': f"🔍 EV条件未達見送り [{sniper_node}] (EV >= {min_ev:.2f} 買い目なし)",
+                'total_bet': 0,
+                'bets_count': 0
+            },
+            df_feat=df_feat,
+            df_race=df_race,
+            p1_dict_honmei=p1_dict_honmei,
+            all_odds=all_odds,
+            benter_probs_dict=benter_probs_dict,
+            bets={}
+        )
     else:
-        export_radar_state({
-            'race_name': f"{v_name} {race_no}R (MOCK)",
-            'venue_name': v_name,
-            'race_no': race_no,
-            'deadline': "15:25 (MOCK)",
-            'p1_score': max_p1,
-            'top_boat': top_boat,
-            'gatekeeper_passed': True,
-            'motor_rate': b1_motor_rate,
-            'wave_height': wave_height,
-            'sniper_go': True,
-            'sniper_node': sniper_node,
-            'status': 'investment_go',
-            'status_message': f"🚀 投資GOサイン点灯！ [{sniper_node}] ({len(bets)}点 / {total_bet:,}円)",
-            'total_bet': total_bet,
-            'bets_count': len(bets),
-            'bets': [
-                {
-                    'combo': c,
-                    'amount': amt,
-                    'odds': all_odds.get(c, 0.0),
-                    'ev': benter_probs_dict.get(c, 0.0) * all_odds.get(c, 0.0),
-                    'expected_return': int((amt / 100.0) * all_odds.get(c, 0.0) * 100.0)
-                }
-                for c, amt in bets.items()
-            ]
-        })
+        export_radar_state(
+            race_info=race_info,
+            ai_eval={
+                'p1_score': max_p1,
+                'top_boat': top_boat,
+                'prob_gap': prob_gap,
+                'gatekeeper_passed': True,
+                'motor_rate': b1_motor_rate,
+                'wave_height': wave_height,
+                'sniper_go': True,
+                'sniper_node': sniper_node,
+                'status': 'investment_go',
+                'status_message': f"🚀 投資GOサイン点灯！ [{sniper_node}] ({len(bets)}点 / {total_bet:,}円)",
+                'total_bet': total_bet,
+                'bets_count': len(bets)
+            },
+            df_feat=df_feat,
+            df_race=df_race,
+            p1_dict_honmei=p1_dict_honmei,
+            all_odds=all_odds,
+            benter_probs_dict=benter_probs_dict,
+            bets=bets
+        )
     
     # Supabase 保存
     try:
