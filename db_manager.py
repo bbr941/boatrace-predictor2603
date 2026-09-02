@@ -939,6 +939,39 @@ def get_hit_focused_race_detail(race_id: str) -> Optional[Dict[str, Any]]:
         return race_dict
 
 
+def clean_mock_data() -> Dict[str, int]:
+    """
+    データベース内のモック/テスト用データを全テーブルから削除
+    """
+    deleted_counts = {}
+    tables_with_race_id = [
+        'hit_focused_bets',
+        'hit_focused_predictions',
+        'manual_recommended_bets',
+        'manual_race_predictions',
+        'recommended_bets',
+        'race_predictions',
+        'odds_data',
+        'notification_logs'
+    ]
+    with get_db_connection() as db:
+        cur = db.cursor()
+        for table in tables_with_race_id:
+            try:
+                cur.execute(f"DELETE FROM {table} WHERE race_id LIKE '%MOCK%' OR race_id LIKE '%TEST%' OR race_id LIKE '%test%';")
+                deleted_counts[table] = cur.rowcount
+            except Exception as e:
+                logger.warning(f"Error cleaning mock data from {table}: {e}")
+                
+        for table in ['race_predictions', 'manual_race_predictions', 'hit_focused_predictions']:
+            try:
+                cur.execute(f"DELETE FROM {table} WHERE status LIKE 'mock%';")
+            except Exception: pass
+            
+    logger.info(f"🧹 モックデータのクリーンアップが完了しました: {deleted_counts}")
+    return deleted_counts
+
+
 def save_odds_batch(race_id: str, odds_dict: Dict[str, float]) -> int:
     """
     全120通りの直前オッズデータを保存 (UPSERT)
