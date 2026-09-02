@@ -824,7 +824,7 @@ class FeatureEngineer:
             9: '南', 10: '南南西', 11: '南西', 12: '西南西', 13: '西', 14: '西北西', 15: '北西', 16: '北北西'
         }
         if pd.api.types.is_numeric_dtype(df['wind_direction']):
-            df['wind_direction'] = df['wind_direction'].map(wind_map).fillna(df['wind_direction']).astype(str).replace('nan', '')
+            df['wind_direction'] = df['wind_direction'].replace(wind_map).astype(str).replace('nan', '')
         else:
             df['wind_direction'] = df['wind_direction'].astype(str).replace('nan', '')
 
