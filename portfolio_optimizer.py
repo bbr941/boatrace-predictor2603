@@ -392,6 +392,76 @@ def optimize_portfolio(
     )
 
 
+def calculate_dutching_bets(
+    benter_probs: Dict[str, float],
+    odds_dict: Dict[str, float],
+    budget: int = 1000,
+    target_cum_prob: float = 0.50,
+    max_combos: int = 8,
+    min_combos: int = 2
+) -> Dict[str, int]:
+    """
+    的中特化: 累積確率50%（最大8点）を抽出し、
+    オッズ逆数和によるダッチング資金配分とトリガミ回避ループを実行
+    """
+    valid_combos = []
+    for combo, prob in sorted(benter_probs.items(), key=lambda x: x[1], reverse=True):
+        o = odds_dict.get(combo, 0.0)
+        if o > 1.0 and prob > 0:
+            valid_combos.append((combo, prob, o))
+            
+    if not valid_combos:
+        return {}
+        
+    selected = []
+    cum_p = 0.0
+    for item in valid_combos:
+        selected.append(item)
+        cum_p += item[1]
+        if (cum_p >= target_cum_prob or len(selected) >= max_combos) and len(selected) >= min_combos:
+            break
+            
+    if len(selected) < min_combos:
+        selected = valid_combos[:min(len(valid_combos), min_combos)]
+        
+    while len(selected) > min_combos:
+        s_val = sum(1.0 / o for _, _, o in selected)
+        if s_val < 0.95:
+            break
+        selected.pop()
+        
+    def allocate(combos_list, target_budget):
+        s = sum(1.0 / o for _, _, o in combos_list)
+        if s <= 0:
+            return {c: 100 for c, _, _ in combos_list}
+        res = {}
+        for c, _, o in combos_list:
+            raw = target_budget * ((1.0 / o) / s)
+            amt = max(100, int(round(raw / 100.0)) * 100)
+            res[c] = amt
+        return res
+        
+    bets = allocate(selected, budget)
+    
+    for _ in range(5):
+        tot = sum(bets.values())
+        trigami_found = False
+        for c, _, o in list(selected):
+            payout = bets.get(c, 0) * o
+            if payout <= tot:
+                trigami_found = True
+                if (bets[c] + 100) * o > (tot + 100):
+                    bets[c] += 100
+                elif len(selected) > min_combos:
+                    selected.pop()
+                    bets = allocate(selected, budget)
+                    break
+        if not trigami_found:
+            break
+            
+    return bets
+
+
 if __name__ == "__main__":
     import time
     print("=== portfolio_optimizer.py 単体動作テスト (動的EV & 端数プール) ===")
