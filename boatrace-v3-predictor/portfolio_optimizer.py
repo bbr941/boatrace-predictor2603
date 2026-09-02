@@ -392,6 +392,98 @@ def optimize_portfolio(
     )
 
 
+def calculate_dutching_bets(
+    benter_probs: Dict[str, float],
+    odds_dict: Dict[str, float],
+    budget: int = 1000,
+    target_cum_prob: float = 0.50,
+    max_combos: int = 8,
+    min_combos: int = 2,
+    min_synthetic_odds: float = 2.5
+) -> Dict[str, int]:
+    """
+    的中特化: 累積確率50%（最大8点）を勝率順に抽出し、
+    合成オッズ >= min_synthetic_odds (デフォルト2.5倍) の制約下で
+    オッズ逆数比によるダッチング資金配分とトリガミ回避ループを実行
+    """
+    valid_combos = []
+    for combo, prob in sorted(benter_probs.items(), key=lambda x: x[1], reverse=True):
+        o = odds_dict.get(combo, 0.0)
+        if o > 1.0 and prob > 0:
+            valid_combos.append((combo, prob, o))
+            
+    if not valid_combos:
+        return {}
+        
+    selected = []
+    cum_p = 0.0
+    inv_sum = 0.0
+    max_inv_sum = (1.0 / min_synthetic_odds) if min_synthetic_odds > 0 else 0.95
+    
+    for item in valid_combos:
+        c_name, c_prob, c_odds = item
+        next_inv_sum = inv_sum + (1.0 / c_odds)
+        
+        # 既に1点以上あり、追加すると合成オッズが min_synthetic_odds を下回る場合は追加をストップ
+        if selected and next_inv_sum > max_inv_sum:
+            if len(selected) >= min_combos:
+                break
+            elif len(selected) + 1 >= min_combos and next_inv_sum <= 0.90:
+                selected.append(item)
+                cum_p += c_prob
+                inv_sum = next_inv_sum
+                break
+            else:
+                break
+                
+        selected.append(item)
+        cum_p += c_prob
+        inv_sum = next_inv_sum
+        
+        if (cum_p >= target_cum_prob or len(selected) >= max_combos) and len(selected) >= min_combos:
+            break
+            
+    if len(selected) < min_combos:
+        selected = valid_combos[:min(len(valid_combos), min_combos)]
+        
+    while len(selected) > min_combos:
+        s_val = sum(1.0 / o for _, _, o in selected)
+        if s_val <= max_inv_sum:
+            break
+        selected.pop()
+        
+    def allocate(combos_list, target_budget):
+        s = sum(1.0 / o for _, _, o in combos_list)
+        if s <= 0:
+            return {c: 100 for c, _, _ in combos_list}
+        res = {}
+        for c, _, o in combos_list:
+            raw = target_budget * ((1.0 / o) / s)
+            amt = max(100, int(round(raw / 100.0)) * 100)
+            res[c] = amt
+        return res
+        
+    bets = allocate(selected, budget)
+    
+    for _ in range(5):
+        tot = sum(bets.values())
+        trigami_found = False
+        for c, _, o in list(selected):
+            payout = bets.get(c, 0) * o
+            if payout <= tot:
+                trigami_found = True
+                if (bets[c] + 100) * o > (tot + 100):
+                    bets[c] += 100
+                elif len(selected) > min_combos:
+                    selected.pop()
+                    bets = allocate(selected, budget)
+                    break
+        if not trigami_found:
+            break
+            
+    return bets
+
+
 if __name__ == "__main__":
     import time
     print("=== portfolio_optimizer.py 単体動作テスト (動的EV & 端数プール) ===")

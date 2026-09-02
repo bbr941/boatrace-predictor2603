@@ -1068,11 +1068,13 @@ def calculate_dutching_bets(
     budget: int = 1000,
     target_cum_prob: float = 0.50,
     max_combos: int = 8,
-    min_combos: int = 2
+    min_combos: int = 2,
+    min_synthetic_odds: float = 2.5
 ) -> Dict[str, int]:
     """
-    的中特化: 累積確率50%（最大8点）を抽出し、
-    オッズ逆数和によるダッチング資金配分とトリガミ回避ループを実行 (GUI表示用メモリ計算)
+    的中特化: 累積確率50%（最大8点）を勝率順に抽出し、
+    合成オッズ >= min_synthetic_odds (デフォルト2.5倍) の制約下で
+    オッズ逆数比によるダッチング資金配分とトリガミ回避ループを実行
     """
     valid_combos = []
     for combo, prob in sorted(benter_probs.items(), key=lambda x: x[1], reverse=True):
@@ -1085,9 +1087,29 @@ def calculate_dutching_bets(
         
     selected = []
     cum_p = 0.0
+    inv_sum = 0.0
+    max_inv_sum = (1.0 / min_synthetic_odds) if min_synthetic_odds > 0 else 0.95
+    
     for item in valid_combos:
+        c_name, c_prob, c_odds = item
+        next_inv_sum = inv_sum + (1.0 / c_odds)
+        
+        # 既に1点以上あり、追加すると合成オッズが min_synthetic_odds を下回る場合は追加をストップ
+        if selected and next_inv_sum > max_inv_sum:
+            if len(selected) >= min_combos:
+                break
+            elif len(selected) + 1 >= min_combos and next_inv_sum <= 0.90:
+                selected.append(item)
+                cum_p += c_prob
+                inv_sum = next_inv_sum
+                break
+            else:
+                break
+                
         selected.append(item)
-        cum_p += item[1]
+        cum_p += c_prob
+        inv_sum = next_inv_sum
+        
         if (cum_p >= target_cum_prob or len(selected) >= max_combos) and len(selected) >= min_combos:
             break
             
@@ -1096,7 +1118,7 @@ def calculate_dutching_bets(
         
     while len(selected) > min_combos:
         s_val = sum(1.0 / o for _, _, o in selected)
-        if s_val < 0.95:
+        if s_val <= max_inv_sum:
             break
         selected.pop()
         
@@ -1515,7 +1537,8 @@ def evaluate_race(
                 budget=1000,
                 target_cum_prob=0.50,
                 max_combos=8,
-                min_combos=2
+                min_combos=2,
+                min_synthetic_odds=2.5
             )
         except Exception: pass
 
@@ -1915,7 +1938,8 @@ def evaluate_mock_race(
                 budget=1000,
                 target_cum_prob=0.50,
                 max_combos=8,
-                min_combos=2
+                min_combos=2,
+                min_synthetic_odds=2.5
             )
         except Exception: pass
 

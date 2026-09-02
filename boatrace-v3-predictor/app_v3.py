@@ -931,11 +931,13 @@ def calculate_dutching_bets(
     budget: int = 1000,
     target_cum_prob: float = 0.50,
     max_combos: int = 8,
-    min_combos: int = 2
+    min_combos: int = 2,
+    min_synthetic_odds: float = 2.5
 ) -> Dict[str, int]:
     """
-    的中特化: 累積確率50%（最大8点）を抽出し、
-    オッズ逆数和によるダッチング資金配分とトリガミ回避ループを実行
+    的中特化: 累積確率50%（最大8点）を勝率順に抽出し、
+    合成オッズ >= min_synthetic_odds (デフォルト2.5倍) の制約下で
+    オッズ逆数比によるダッチング資金配分とトリガミ回避ループを実行
     """
     # 1. 確率降順ソート & 有効オッズフィルタ (Odds > 1.0)
     valid_combos = []
@@ -947,24 +949,43 @@ def calculate_dutching_bets(
     if not valid_combos:
         return {}
         
-    # 2. 累積確率50% または 最大8点まで抽出 (最低2点)
+    # 2. 合成オッズ制約 (min_synthetic_odds) を考慮しながら勝率上位を抽出
     selected = []
     cum_p = 0.0
+    inv_sum = 0.0
+    max_inv_sum = (1.0 / min_synthetic_odds) if min_synthetic_odds > 0 else 0.95
+    
     for item in valid_combos:
+        c_name, c_prob, c_odds = item
+        next_inv_sum = inv_sum + (1.0 / c_odds)
+        
+        # 既に1点以上あり、追加すると合成オッズが min_synthetic_odds を下回る場合は追加をストップ
+        if selected and next_inv_sum > max_inv_sum:
+            if len(selected) >= min_combos:
+                break
+            elif len(selected) + 1 >= min_combos and next_inv_sum <= 0.90:
+                selected.append(item)
+                cum_p += c_prob
+                inv_sum = next_inv_sum
+                break
+            else:
+                break
+                
         selected.append(item)
-        cum_p += item[1]
+        cum_p += c_prob
+        inv_sum = next_inv_sum
+        
         if (cum_p >= target_cum_prob or len(selected) >= max_combos) and len(selected) >= min_combos:
             break
             
     if len(selected) < min_combos:
         selected = valid_combos[:min(len(valid_combos), min_combos)]
         
-    # 3. トリガミ回避ループ (オッズ逆数和 S < 0.95)
+    # 3. トリガミ・合成オッズ厳密調整
     while len(selected) > min_combos:
         s_val = sum(1.0 / o for _, _, o in selected)
-        if s_val < 0.95:
+        if s_val <= max_inv_sum:
             break
-        # オッズ逆数和が 0.95 以上の場合は末尾（確率最下位）を削除して再計算
         selected.pop()
         
     # 4. 予算配分 (100円丸め、最低100円)
@@ -1338,6 +1359,38 @@ elif app_mode == "🛡️ 的中特化パネル (Hit-Focused)":
     if "selected_hit_race" not in st.session_state:
         st.session_state.selected_hit_race = None
 
+    # 戦略ガイド（友人共有用・運用ルールボード）
+    st.markdown("""
+    <div style="background: linear-gradient(135deg, rgba(213, 0, 249, 0.12), rgba(0, 229, 255, 0.08)); border: 1.5px solid #D500F9; border-radius: 14px; padding: 18px 22px; margin-bottom: 20px; box-shadow: 0 4px 20px rgba(213, 0, 249, 0.15);">
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
+            <div style="font-size: 1.35em; font-weight: 800; color: #FFFFFF;">
+                🎯 【戦略】プール型・変則2連コロガシ <span style="font-size:0.8em; color:#00E5FF;">(目標合成オッズ 2.5倍)</span>
+            </div>
+            <span style="background: #D500F9; color: #fff; padding: 3px 10px; border-radius: 6px; font-size: 0.8em; font-weight: bold;">FRIENDS GUIDE</span>
+        </div>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 10px;">
+            <div style="background: rgba(0,0,0,0.35); border-radius: 8px; padding: 12px 14px; border-left: 3.5px solid #00E5FF;">
+                <div style="font-size: 0.85em; color: #00E5FF; font-weight: bold;">1️⃣ 1戦目（基本エントリー）</div>
+                <div style="font-size: 1.15em; font-weight: bold; color: #fff; margin-top: 4px;">投資 1,000 円</div>
+                <div style="font-size: 0.85em; color: #ccc; margin-top: 2px;">🎯 的中で <b style="color:#00E676; font-size:1.05em;">約 2,500 円</b> 払戻</div>
+            </div>
+            <div style="background: rgba(0,0,0,0.35); border-radius: 8px; padding: 12px 14px; border-left: 3.5px solid #FFD600;">
+                <div style="font-size: 0.85em; color: #FFD600; font-weight: bold;">🛡️ 中間メンタルリセット</div>
+                <div style="font-size: 1.15em; font-weight: bold; color: #fff; margin-top: 4px;">500 円をプール（残す）</div>
+                <div style="font-size: 0.85em; color: #ccc; margin-top: 2px;">手元に利益確保し全損を完全回避！</div>
+            </div>
+            <div style="background: rgba(0,0,0,0.35); border-radius: 8px; padding: 12px 14px; border-left: 3.5px solid #00E676;">
+                <div style="font-size: 0.85em; color: #00E676; font-weight: bold;">2️⃣ 2戦目（利確チャレンジ）</div>
+                <div style="font-size: 1.15em; font-weight: bold; color: #fff; margin-top: 4px;">投資 2,000 円</div>
+                <div style="font-size: 0.85em; color: #ccc; margin-top: 2px;">🎯 的中で <b style="color:#00E676; font-size:1.05em;">約 5,000 円</b> ➔ 即利確！</div>
+            </div>
+        </div>
+        <div style="background: rgba(255, 82, 82, 0.15); border: 1px dashed #FF5252; border-radius: 6px; padding: 8px 14px; margin-top: 12px; font-size: 0.9em; color: #FF8A80;">
+            ⚡ <b>鉄の掟:</b> 途中で外れた場合は絶対に追い上げず、<b>必ず 1,000円（1戦目）スタートに戻すこと！</b>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
     # 詳細画面が選択されている場合
     if st.session_state.selected_hit_race:
         selected_race_id = st.session_state.selected_hit_race
@@ -1369,6 +1422,10 @@ elif app_mode == "🛡️ 的中特化パネル (Hit-Focused)":
             min_prof = detail.get('min_profit', 0) or 0
             bets_list = detail.get('bets', [])
 
+            # 合成オッズの算出
+            inv_odds_sum = sum(1.0 / b['odds'] for b in bets_list if b.get('odds', 0) > 0)
+            synthetic_odds = (1.0 / inv_odds_sum) if inv_odds_sum > 0 else 0.0
+
             st.markdown(f"""
             <div style="background: linear-gradient(135deg, rgba(0, 229, 255, 0.1), rgba(0, 150, 136, 0.03)); border: 1.5px solid #00E5FF; border-radius: 12px; padding: 16px 20px; margin-bottom: 16px;">
                 <div style="display: flex; justify-content: space-between; align-items: center;">
@@ -1396,11 +1453,12 @@ elif app_mode == "🛡️ 的中特化パネル (Hit-Focused)":
                 </div>
                 """, unsafe_allow_html=True)
             with m2:
+                synth_color = "#00E676" if synthetic_odds >= 2.5 else "#FFD600"
                 st.markdown(f"""
                 <div class="metric-card">
-                    <div style="font-size: 0.85em; color: #888;">💰 推奨投資総額</div>
-                    <div style="font-size: 1.8em; font-weight: 700; color: #FFFFFF;">{tbet:,} <span style="font-size:0.5em; font-weight:400;">円</span></div>
-                    <div style="font-size: 0.8em; color: #aaa; margin-top: 4px;">オッズ逆数比ダッチング</div>
+                    <div style="font-size: 0.85em; color: #888;">⚡ 実効合成オッズ</div>
+                    <div style="font-size: 1.8em; font-weight: 700; color: {synth_color};">{synthetic_odds:.2f} <span style="font-size:0.5em; font-weight:400;">倍</span></div>
+                    <div style="font-size: 0.8em; color: #aaa; margin-top: 4px;">目標 2.50 倍以上制約</div>
                 </div>
                 """, unsafe_allow_html=True)
             with m3:
@@ -1423,18 +1481,53 @@ elif app_mode == "🛡️ 的中特化パネル (Hit-Focused)":
 
             st.markdown("---")
 
-            # 買い目一覧テーブル
+            # コロガシ段階に応じた資金配分切り替え
             st.markdown("### 📋 的中特化 買い目＆資金配分表 (動的ダッチング)")
+            
+            stage_choice = st.radio(
+                "💰 投資ステージを選択（配分シミュレーション）:",
+                ["1️⃣ 1戦目: 1,000円 (基本エントリー)", "2️⃣ 2戦目: 2,000円 (変則コロガシ勝負)"],
+                index=0,
+                horizontal=True
+            )
+            
+            target_sim_budget = 1000 if "1,000円" in stage_choice else 2000
+            
             if bets_list:
-                df_bets = pd.DataFrame(bets_list)[['combination', 'bet_amount', 'prob', 'odds', 'ev', 'expected_return', 'profit']]
-                df_bets.columns = ['買い目', '推奨投資額 (円)', '勝率 (Benter)', '実オッズ', 'EV (期待値)', '払戻見込 (円)', '純利益 (円)']
-                df_bets['推奨投資額 (円)'] = df_bets['推奨投資額 (円)'].apply(lambda x: f"{x:,} 円")
-                df_bets['勝率 (Benter)'] = df_bets['勝率 (Benter)'].apply(lambda x: f"{x:.2%}")
-                df_bets['実オッズ'] = df_bets['実オッズ'].apply(lambda x: f"{x:.1f} 倍" if x > 0 else "-")
-                df_bets['EV (期待値)'] = df_bets['EV (期待値)'].apply(lambda x: f"{x:.2f}")
-                df_bets['払戻見込 (円)'] = df_bets['払戻見込 (円)'].apply(lambda x: f"{x:,} 円" if x > 0 else "-")
-                df_bets['純利益 (円)'] = df_bets['純利益 (円)'].apply(lambda x: f"{x:+,} 円" if x != 0 else "0 円")
-                st.dataframe(df_bets, use_container_width=True, hide_index=True)
+                # 選択された予算（1000円 or 2000円）に応じてリアルタイム再分配
+                combos_data = [(b['combination'], b.get('prob', 0.0), b.get('odds', 0.0)) for b in bets_list]
+                s_sum = sum(1.0 / o for _, _, o in combos_data if o > 0)
+                
+                rows_display = []
+                total_sim_bet = 0
+                for c, p, o in combos_data:
+                    raw_amt = target_sim_budget * ((1.0 / o) / s_sum) if s_sum > 0 else 100
+                    amt = max(100, int(round(raw_amt / 100.0)) * 100)
+                    total_sim_bet += amt
+                    exp_payout = int((amt / 100.0) * o * 100.0)
+                    profit = exp_payout - total_sim_bet
+                    rows_display.append({
+                        '買い目': c,
+                        '推奨投資額 (円)': f"{amt:,} 円",
+                        '勝率 (Benter)': f"{p:.2%}",
+                        '実オッズ': f"{o:.1f} 倍" if o > 0 else "-",
+                        'EV (期待値)': f"{(p * o):.2f}",
+                        '払戻見込 (円)': f"{exp_payout:,} 円",
+                        '純利益 (円)': f"{profit:+,} 円",
+                        '_amt': amt,
+                        '_payout': exp_payout
+                    })
+                
+                # 正確な純利益再計算（総投資額確定後）
+                for r in rows_display:
+                    p = r['_payout'] - total_sim_bet
+                    r['純利益 (円)'] = f"{p:+,} 円"
+                    del r['_amt']
+                    del r['_payout']
+                    
+                df_bets_show = pd.DataFrame(rows_display)
+                st.dataframe(df_bets_show, use_container_width=True, hide_index=True)
+                st.caption(f"💡 【{stage_choice[:3]} 合計投資額: {total_sim_bet:,} 円】 どの買い目が的中しても目標合成オッズ {synthetic_odds:.2f}倍の均等払戻金が得られます。")
             else:
                 st.info("このレースの買い目データはありません。")
 
@@ -1466,7 +1559,7 @@ elif app_mode == "🛡️ 的中特化パネル (Hit-Focused)":
     # 会場別グリッド一覧画面 (デフォルト)
     else:
         st.title("🛡️ 的中特化 全レースパネル (Official Grid View)")
-        st.caption("全レースの累積勝率50%抽出＆動的ダッチング（トリガミ自動回避）計算結果を公式アプリ風グリッドで一覧表示")
+        st.caption("全レースの累積勝率50%抽出＆動的ダッチング（目標合成オッズ2.5倍）計算結果を公式アプリ風グリッドで一覧表示")
 
         col_h1, col_h2, col_h3 = st.columns([2, 1, 1])
         with col_h1:

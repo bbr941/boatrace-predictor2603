@@ -46,6 +46,7 @@ DEFAULT_BUDGET = 1000
 DEFAULT_TARGET_CUM_PROB = 0.50
 DEFAULT_MAX_COMBOS = 8
 DEFAULT_MIN_COMBOS = 2
+DEFAULT_MIN_SYNTHETIC_ODDS = 2.5
 
 
 def run_backtest(
@@ -57,6 +58,7 @@ def run_backtest(
     target_cum_prob: float = DEFAULT_TARGET_CUM_PROB,
     max_combos: int = DEFAULT_MAX_COMBOS,
     min_combos: int = DEFAULT_MIN_COMBOS,
+    min_synthetic_odds: float = DEFAULT_MIN_SYNTHETIC_ODDS,
     sample_limit: int = None
 ):
     print("=" * 85, flush=True)
@@ -224,7 +226,8 @@ def run_backtest(
             budget=budget,
             target_cum_prob=target_cum_prob,
             max_combos=max_combos,
-            min_combos=min_combos
+            min_combos=min_combos,
+            min_synthetic_odds=min_synthetic_odds
         )
         
         if not bets:
@@ -481,6 +484,7 @@ if __name__ == '__main__':
     parser.add_argument('--target-cum-prob', type=float, default=DEFAULT_TARGET_CUM_PROB, help='目標累積勝率 (0.50)')
     parser.add_argument('--max-combos', type=int, default=DEFAULT_MAX_COMBOS, help='最大買い目数 (8)')
     parser.add_argument('--min-combos', type=int, default=DEFAULT_MIN_COMBOS, help='最小買い目数 (2)')
+    parser.add_argument('--min-synthetic-odds', type=float, default=DEFAULT_MIN_SYNTHETIC_ODDS, help='最小合成オッズ制約 (2.5)')
     parser.add_argument('--sample-limit', type=int, default=None, help='検証レース数の上限 (テスト用)')
 
     args = parser.parse_args()
@@ -494,5 +498,6 @@ if __name__ == '__main__':
         target_cum_prob=args.target_cum_prob,
         max_combos=args.max_combos,
         min_combos=args.min_combos,
+        min_synthetic_odds=args.min_synthetic_odds,
         sample_limit=args.sample_limit
     )
