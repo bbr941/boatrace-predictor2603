@@ -1676,7 +1676,7 @@ def settle_race_results(
     source: Optional[str] = 'auto'
 ) -> List[Dict[str, Any]]:
     """
-    未確定レースの結果を公式から取得し、推奨買い目と照合して確定損益をSupabaseへ反映
+    未確定レースの結果を公式から取得し、推奨買い目(Sniper)および的中特化(Hit-Focused)と照合して確定損益をデータベースへ反映
     """
     if not hasattr(db_manager, 'get_unresolved_predictions'):
         try:
@@ -1685,92 +1685,182 @@ def settle_race_results(
         except Exception:
             pass
             
-    unresolved = db_manager.get_unresolved_predictions(date_str=target_date, source=source) if hasattr(db_manager, 'get_unresolved_predictions') else []
-    if not unresolved:
+    unresolved_main = db_manager.get_unresolved_predictions(date_str=target_date, source=source) if hasattr(db_manager, 'get_unresolved_predictions') else []
+    unresolved_hit = db_manager.get_unresolved_hit_focused_predictions(date_str=target_date) if hasattr(db_manager, 'get_unresolved_hit_focused_predictions') else []
+    
+    if not unresolved_main and not unresolved_hit:
         return []
 
-        
-    logger.info(f"🔍 [SETTLEMENT] {len(unresolved)} 件の未確定レースの結果確認を開始します...")
+    # レース結果キャッシュ (同一レースの重複スクレイピング防止)
+    result_cache: Dict[Tuple[str, int, int], Optional[Dict[str, Any]]] = {}
+    def fetch_result(date_s: str, v_code: int, r_no: int) -> Optional[Dict[str, Any]]:
+        key = (date_s, v_code, r_no)
+        if key not in result_cache:
+            result_cache[key] = BoatRaceScraper.get_race_result(date_s, v_code, r_no)
+        return result_cache[key]
+
     settled_results = []
     
-    for r in unresolved:
-        race_id = r['race_id']
-        date_str = r['race_date']
-        venue_code = r['venue_code']
-        venue_name = r['venue_name']
-        race_no = r['race_no']
-        status = r['status']
-        
-        # モックレースの場合は結果スクレイピングをスキップ
-        if "_MOCK" in race_id:
-            continue
+    # 1. 本番・黄金ベースライン (race_predictions) の精算
+    if unresolved_main:
+        logger.info(f"🔍 [SETTLEMENT: MAIN] {len(unresolved_main)} 件の未確定レースの結果確認を開始します...")
+        for r in unresolved_main:
+            race_id = r['race_id']
+            date_str = r['race_date']
+            venue_code = r['venue_code']
+            venue_name = r['venue_name']
+            race_no = r['race_no']
             
-        result = BoatRaceScraper.get_race_result(date_str, venue_code, race_no)
-        if not result:
-            continue
+            # モックレースの場合は結果スクレイピングをスキップ
+            if "_MOCK" in race_id:
+                continue
+                
+            res = fetch_result(date_str, venue_code, race_no)
+            if not res:
+                continue
+                
+            combo = res['combo']
+            payout_per_100 = res['payout_per_100']
             
-        combo = result['combo']
-        payout_per_100 = result['payout_per_100']
-        
-        # 推奨買い目を取得
-        bets = db_manager.get_recommended_bets(race_id)
-        
-        if not bets:
-            # 投資対象外レース (Gatekeeper見送り、難水面スキップ、EV見送り等)
+            # 推奨買い目を取得
+            bets = db_manager.get_recommended_bets(race_id)
+            
+            if not bets:
+                # 投資対象外レース (Gatekeeper見送り、難水面スキップ、EV見送り等)
+                db_manager.update_race_result(
+                    race_id=race_id,
+                    actual_result=combo,
+                    payout=0,
+                    profit=0,
+                    hit_status="no_bet"
+                )
+                settled_results.append({
+                    'race_id': race_id,
+                    'venue_name': venue_name,
+                    'race_no': race_no,
+                    'mode': 'main',
+                    'actual_result': combo,
+                    'hit_status': 'no_bet',
+                    'payout': 0,
+                    'profit': 0
+                })
+                continue
+                
+            # 投資ありレースの的中判定
+            total_bet = sum(b['bet_amount'] for b in bets)
+            hit_bet = next((b for b in bets if b['combination'] == combo), None)
+            
+            if hit_bet:
+                bet_amt = hit_bet['bet_amount']
+                actual_payout = int((bet_amt / 100.0) * payout_per_100)
+                profit = actual_payout - total_bet
+                hit_status = "hit"
+                logger.info(f"🎉🎉🎉 [🎯Sniper的中!] {venue_name} {race_no}R: 結果 {combo} | 投資: {total_bet:,}円 -> 払戻: {actual_payout:,}円 (純利益: {profit:+,}円)")
+            else:
+                actual_payout = 0
+                profit = - total_bet
+                hit_status = "miss"
+                logger.info(f"❌ [Sniper不的中] {venue_name} {race_no}R: 結果 {combo} | 投資: {total_bet:,}円 -> 払戻: 0円 (損失: {profit:,}円)")
+                
             db_manager.update_race_result(
                 race_id=race_id,
                 actual_result=combo,
-                payout=0,
-                profit=0,
-                hit_status="no_bet"
+                payout=actual_payout,
+                profit=profit,
+                hit_status=hit_status
             )
+            
             settled_results.append({
                 'race_id': race_id,
                 'venue_name': venue_name,
                 'race_no': race_no,
+                'mode': 'main',
                 'actual_result': combo,
-                'hit_status': 'no_bet',
-                'payout': 0,
-                'profit': 0
+                'hit_status': hit_status,
+                'payout': actual_payout,
+                'profit': profit
             })
-            continue
             
-        # 投資ありレースの的中判定
-        total_bet = sum(b['bet_amount'] for b in bets)
-        hit_bet = next((b for b in bets if b['combination'] == combo), None)
-        
-        if hit_bet:
-            bet_amt = hit_bet['bet_amount']
-            actual_payout = int((bet_amt / 100.0) * payout_per_100)
-            profit = actual_payout - total_bet
-            hit_status = "hit"
-            logger.info(f"🎉🎉🎉 [🎯的中!] {venue_name} {race_no}R: 結果 {combo} | 投資: {total_bet:,}円 -> 払戻: {actual_payout:,}円 (純利益: {profit:+,}円)")
-        else:
-            actual_payout = 0
-            profit = - total_bet
-            hit_status = "miss"
-            logger.info(f"❌ [不的中] {venue_name} {race_no}R: 結果 {combo} | 投資: {total_bet:,}円 -> 払戻: 0円 (損失: {profit:,}円)")
+    # 2. 的中特化 (hit_focused_predictions) の精算
+    if unresolved_hit:
+        logger.info(f"🔍 [SETTLEMENT: HIT-FOCUSED] {len(unresolved_hit)} 件の未確定的中特化レースの結果確認を開始します...")
+        for r in unresolved_hit:
+            race_id = r['race_id']
+            date_str = r['race_date']
+            venue_code = r['venue_code']
+            venue_name = r['venue_name']
+            race_no = r['race_no']
             
-        db_manager.update_race_result(
-            race_id=race_id,
-            actual_result=combo,
-            payout=actual_payout,
-            profit=profit,
-            hit_status=hit_status
-        )
-        
-        settled_results.append({
-            'race_id': race_id,
-            'venue_name': venue_name,
-            'race_no': race_no,
-            'actual_result': combo,
-            'hit_status': hit_status,
-            'payout': actual_payout,
-            'profit': profit
-        })
-        
+            # モックレースの場合は結果スクレイピングをスキップ
+            if "_MOCK" in race_id:
+                continue
+                
+            res = fetch_result(date_str, venue_code, race_no)
+            if not res:
+                continue
+                
+            combo = res['combo']
+            payout_per_100 = res['payout_per_100']
+            
+            detail = db_manager.get_hit_focused_race_detail(race_id)
+            bets = detail.get('bets', []) if detail else []
+            
+            if not bets:
+                db_manager.update_hit_focused_result(
+                    race_id=race_id,
+                    actual_result=combo,
+                    payout=0,
+                    profit=0,
+                    hit_status="no_bet"
+                )
+                settled_results.append({
+                    'race_id': race_id,
+                    'venue_name': venue_name,
+                    'race_no': race_no,
+                    'mode': 'hit_focused',
+                    'actual_result': combo,
+                    'hit_status': 'no_bet',
+                    'payout': 0,
+                    'profit': 0
+                })
+                continue
+                
+            total_bet = sum(b['bet_amount'] for b in bets)
+            hit_bet = next((b for b in bets if b['combination'] == combo), None)
+            
+            if hit_bet:
+                bet_amt = hit_bet['bet_amount']
+                actual_payout = int((bet_amt / 100.0) * payout_per_100)
+                profit = actual_payout - total_bet
+                hit_status = "hit"
+                logger.info(f"💮 [🎯的中特化 的中!] {venue_name} {race_no}R: 結果 {combo} | 投資: {total_bet:,}円 -> 払戻: {actual_payout:,}円 (純利益: {profit:+,}円)")
+            else:
+                actual_payout = 0
+                profit = - total_bet
+                hit_status = "miss"
+                logger.info(f"💀 [的中特化 不的中] {venue_name} {race_no}R: 結果 {combo} | 投資: {total_bet:,}円 -> 払戻: 0円 (損失: {profit:,}円)")
+                
+            db_manager.update_hit_focused_result(
+                race_id=race_id,
+                actual_result=combo,
+                payout=actual_payout,
+                profit=profit,
+                hit_status=hit_status
+            )
+            
+            settled_results.append({
+                'race_id': race_id,
+                'venue_name': venue_name,
+                'race_no': race_no,
+                'mode': 'hit_focused',
+                'actual_result': combo,
+                'hit_status': hit_status,
+                'payout': actual_payout,
+                'profit': profit
+            })
+            
     if settled_results:
-        logger.info(f"🏁 [SETTLEMENT] {len(settled_results)} 件のレース確定収支をデータベースに反映しました。")
+        logger.info(f"🏁 [SETTLEMENT] {len(settled_results)} 件の確定収支をデータベースに反映しました。")
         
     return settled_results
 

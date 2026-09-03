@@ -1102,6 +1102,70 @@ def update_race_result(
         return True
 
 
+def update_hit_focused_result(
+    race_id: str,
+    actual_result: str,
+    payout: int,
+    profit: int,
+    hit_status: str
+) -> bool:
+    """
+    的中特化テーブルのレース確定結果と払戻金・確定損益を更新 (is_resolved = TRUE)
+    """
+    with get_db_connection() as db:
+        cur = db.cursor()
+        ph = "%s" if db.is_postgres else "?"
+        resolved_val = "TRUE" if db.is_postgres else "1"
+        
+        query = f"""
+        UPDATE hit_focused_predictions
+        SET actual_result = {ph},
+            payout = {ph},
+            profit = {ph},
+            hit_status = {ph},
+            is_resolved = {resolved_val}
+        WHERE race_id = {ph};
+        """
+        cur.execute(query, (actual_result, int(payout), int(profit), hit_status, race_id))
+        logger.info(f"🏁 [{race_id}] 的中特化結果確定更新: {actual_result} | Status: {hit_status} | Payout: {payout:,}円 | Profit: {profit:+,}円")
+        return True
+
+
+def get_unresolved_hit_focused_predictions(
+    date_str: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """
+    的中特化テーブルから結果未確定の推論レコードを取得
+    """
+    with get_db_connection() as db:
+        cur = db.cursor()
+        ph = "%s" if db.is_postgres else "?"
+        
+        conditions = []
+        params = []
+        
+        if db.is_postgres:
+            conditions.append("(is_resolved IS NULL OR is_resolved = FALSE)")
+        else:
+            conditions.append("(is_resolved IS NULL OR is_resolved = 0)")
+            
+        if date_str:
+            clean_date = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}" if (len(date_str) == 8 and date_str.isdigit()) else date_str
+            conditions.append(f"(race_date = {ph} OR race_date = {ph})")
+            params.extend([date_str, clean_date])
+            
+        where_sql = f"WHERE {' AND '.join(conditions)}"
+        query = f"""
+        SELECT race_id, race_date, venue_code, venue_name, race_no, deadline_time, status, total_bet
+        FROM hit_focused_predictions
+        {where_sql}
+        ORDER BY race_date ASC, venue_code ASC, race_no ASC;
+        """
+        cur.execute(query, params)
+        cols = [desc[0] for desc in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
 def get_unresolved_predictions(
     date_str: Optional[str] = None,
     source: Optional[str] = 'auto'

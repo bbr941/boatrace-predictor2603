@@ -1426,6 +1426,12 @@ elif app_mode == "🛡️ 的中特化パネル (Hit-Focused)":
             inv_odds_sum = sum(1.0 / b['odds'] for b in bets_list if b.get('odds', 0) > 0)
             synthetic_odds = (1.0 / inv_odds_sum) if inv_odds_sum > 0 else 0.0
 
+            is_res = bool(detail.get('is_resolved'))
+            act_res = detail.get('actual_result')
+            act_pay = detail.get('payout', 0) or 0
+            act_prof = detail.get('profit', 0) or 0
+            h_stat = detail.get('hit_status', '')
+
             st.markdown(f"""
             <div style="background: linear-gradient(135deg, rgba(0, 229, 255, 0.1), rgba(0, 150, 136, 0.03)); border: 1.5px solid #00E5FF; border-radius: 12px; padding: 16px 20px; margin-bottom: 16px;">
                 <div style="display: flex; justify-content: space-between; align-items: center;">
@@ -1442,6 +1448,33 @@ elif app_mode == "🛡️ 的中特化パネル (Hit-Focused)":
                 </div>
             </div>
             """, unsafe_allow_html=True)
+
+            # 結果確定済みの場合は結果バナーを表示
+            if is_res:
+                if h_stat == 'hit' or act_prof > 0:
+                    st.markdown(f"""
+                    <div style="background: linear-gradient(135deg, rgba(0, 230, 118, 0.15), rgba(0, 200, 83, 0.05)); border: 2px solid #00E676; border-radius: 10px; padding: 12px 18px; margin-bottom: 16px;">
+                        <div style="font-size: 1.25em; font-weight: bold; color: #00E676;">
+                            💮 【的中！】 確定3連単: <span style="color:#FFF; background:#00C853; padding:2px 8px; border-radius:4px;">{act_res}</span>
+                        </div>
+                        <div style="font-size: 1.0em; color: #E0E0E0; margin-top: 6px;">
+                            💰 <b>確定払戻金:</b> <b style="color:#FFD600; font-size:1.15em;">{act_pay:,} 円</b> &nbsp;|&nbsp; 
+                            💎 <b>確定純利益:</b> <b style="color:#00E676; font-size:1.15em;">{act_prof:+,} 円</b>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    st.markdown(f"""
+                    <div style="background: linear-gradient(135deg, rgba(255, 82, 82, 0.15), rgba(211, 47, 47, 0.05)); border: 2px solid #FF5252; border-radius: 10px; padding: 12px 18px; margin-bottom: 16px;">
+                        <div style="font-size: 1.25em; font-weight: bold; color: #FF5252;">
+                            💀 【不的中】 確定3連単: <span style="color:#FFF; background:#D32F2F; padding:2px 8px; border-radius:4px;">{act_res or '未確定'}</span>
+                        </div>
+                        <div style="font-size: 1.0em; color: #E0E0E0; margin-top: 6px;">
+                            💰 <b>確定払戻金:</b> 0 円 &nbsp;|&nbsp; 
+                            💸 <b>確定損益:</b> <b style="color:#FF5252; font-size:1.15em;">{act_prof:+,} 円</b>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
 
             m1, m2, m3, m4 = st.columns(4)
             with m1:
@@ -1494,7 +1527,6 @@ elif app_mode == "🛡️ 的中特化パネル (Hit-Focused)":
             target_sim_budget = 1000 if "1,000円" in stage_choice else 2000
             
             if bets_list:
-                # 選択された予算（1000円 or 2000円）に応じてリアルタイム再分配
                 combos_data = [(b['combination'], b.get('prob', 0.0), b.get('odds', 0.0)) for b in bets_list]
                 s_sum = sum(1.0 / o for _, _, o in combos_data if o > 0)
                 
@@ -1506,8 +1538,10 @@ elif app_mode == "🛡️ 的中特化パネル (Hit-Focused)":
                     total_sim_bet += amt
                     exp_payout = int((amt / 100.0) * o * 100.0)
                     profit = exp_payout - total_sim_bet
+                    is_this_hit = (act_res == c) if is_res else False
+                    c_label = f"🎯 {c} (的中!)" if is_this_hit else c
                     rows_display.append({
-                        '買い目': c,
+                        '買い目': c_label,
                         '推奨投資額 (円)': f"{amt:,} 円",
                         '勝率 (Benter)': f"{p:.2%}",
                         '実オッズ': f"{o:.1f} 倍" if o > 0 else "-",
@@ -1518,7 +1552,6 @@ elif app_mode == "🛡️ 的中特化パネル (Hit-Focused)":
                         '_payout': exp_payout
                     })
                 
-                # 正確な純利益再計算（総投資額確定後）
                 for r in rows_display:
                     p = r['_payout'] - total_sim_bet
                     r['純利益 (円)'] = f"{p:+,} 円"
@@ -1561,15 +1594,26 @@ elif app_mode == "🛡️ 的中特化パネル (Hit-Focused)":
         st.title("🛡️ 的中特化 全レースパネル (Official Grid View)")
         st.caption("全レースの累積勝率50%抽出＆動的ダッチング（目標合成オッズ2.5倍）計算結果を公式アプリ風グリッドで一覧表示")
 
-        col_h1, col_h2, col_h3 = st.columns([2, 1, 1])
+        col_h1, col_h2, col_h3, col_h4 = st.columns([2, 1.2, 1.2, 1])
         with col_h1:
             today_date = datetime.date.today()
             selected_hit_date = st.date_input("📅 開催日 (Date)", today_date, key="hit_panel_date")
         with col_h2:
-            if st.button("🔄 最新データ更新", use_container_width=True):
+            if st.button("🔄 最新更新", use_container_width=True):
                 st.rerun()
         with col_h3:
-            if st.button("🧪 モック推論生成", help="テスト用の模擬的中特化レースを生成してDBへ保存します", use_container_width=True, key="btn_hit_mock"):
+            if st.button("🏁 結果精算", help="公式レース結果を取得して的中特化の収支を確定します", use_container_width=True, key="btn_hit_settle"):
+                import auto_trader
+                date_str_q = selected_hit_date.strftime('%Y%m%d')
+                with st.spinner("レース結果を取得して収支を確定中..."):
+                    settled = auto_trader.settle_race_results(target_date=date_str_q)
+                    if settled:
+                        st.success(f"🎉 {len(settled)} 件のレース結果を確定・更新しました！")
+                    else:
+                        st.info("確定可能な新規レース結果はありませんでした。")
+                st.rerun()
+        with col_h4:
+            if st.button("🧪 モック生成", help="テスト用の模擬的中特化レースを生成してDBへ保存します", use_container_width=True, key="btn_hit_mock"):
                 import auto_trader
                 with st.spinner("模擬レース推論を実行中..."):
                     auto_trader.evaluate_mock_race(venue_code=18, race_no=10, dry_run=True)
@@ -1582,6 +1626,27 @@ elif app_mode == "🛡️ 的中特化パネル (Hit-Focused)":
         if not hit_races:
             st.info(f"💡 {selected_hit_date.strftime('%Y年%m月%d日')} の的中特化データはまだありません。\n\n自動推論エンジン (`auto_trader.py`) が稼働すると、各レースの締切5分前に自動で蓄積されます。")
         else:
+            # 本日の確定成績サマリーバー (確定レースがある場合)
+            resolved_hit_races = [r for r in hit_races if bool(r.get('is_resolved'))]
+            if resolved_hit_races:
+                res_cnt = len(resolved_hit_races)
+                h_cnt = sum(1 for r in resolved_hit_races if r.get('hit_status') == 'hit')
+                tot_inv = sum(r.get('total_bet', 0) or 0 for r in resolved_hit_races)
+                tot_pay = sum(r.get('payout', 0) or 0 for r in resolved_hit_races)
+                tot_prof = tot_pay - tot_inv
+                hit_pct = (h_cnt / res_cnt * 100.0) if res_cnt > 0 else 0.0
+                roi_pct = (tot_pay / tot_inv * 100.0) if tot_inv > 0 else 0.0
+                prof_c = "#00E676" if tot_prof > 0 else ("#FF5252" if tot_prof < 0 else "#FFFFFF")
+
+                st.markdown(f"""
+                <div style="background: rgba(0,0,0,0.4); border: 1.5px solid #455A64; border-radius: 10px; padding: 12px 18px; margin-top: 10px; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                    <div>📊 <b>本日確定成績:</b> <span style="color:#00E5FF; font-weight:bold;">{res_cnt}</span> レース確定</div>
+                    <div>🎯 <b>的中数:</b> <span style="color:#00E676; font-weight:bold;">{h_cnt}</span> / {res_cnt} (<span style="color:#00E676; font-weight:bold;">{hit_pct:.1f}%</span>)</div>
+                    <div>💰 <b>総投資:</b> {tot_inv:,} 円 | <b>総払戻:</b> {tot_pay:,} 円</div>
+                    <div>💎 <b>確定収支:</b> <span style="color:{prof_c}; font-size:1.15em; font-weight:bold;">{tot_prof:+,} 円</span> (回収率: <b>{roi_pct:.1f}%</b>)</div>
+                </div>
+                """, unsafe_allow_html=True)
+
             # 会場ごとにグループ化
             venues_dict = {}
             for r in hit_races:
@@ -1616,8 +1681,22 @@ elif app_mode == "🛡️ 的中特化パネル (Hit-Focused)":
                             b_cnt = r_item.get('bets_count', 0)
                             t_bet = r_item.get('total_bet', 0)
                             min_p = r_item.get('min_profit', 0)
+                            is_r_resolved = bool(r_item.get('is_resolved'))
+                            r_act_combo = r_item.get('actual_result', '')
+                            r_payout = r_item.get('payout', 0) or 0
+                            r_profit = r_item.get('profit', 0) or 0
+                            r_hit_stat = r_item.get('hit_status', '')
                             
-                            btn_label = f"🏁 **{r_no}R** (締切 {d_time})\n\n🎯 {b_cnt}点 ({t_bet:,}円)\n\n利益: {min_p:+,}円"
+                            if is_r_resolved:
+                                if r_hit_stat == 'hit' or r_profit > 0:
+                                    btn_label = f"🏁 **{r_no}R** ({r_act_combo})\n\n💮 **的中! {r_profit:+,}円**\n\n払戻: {r_payout:,}円"
+                                elif r_hit_stat == 'miss' or r_profit <= 0:
+                                    btn_label = f"🏁 **{r_no}R** ({r_act_combo})\n\n💀 **ハズレ {r_profit:+,}円**\n\n払戻: 0円"
+                                else:
+                                    btn_label = f"🏁 **{r_no}R** ({r_act_combo})\n\n☕ 見送り\n\n収支: 0円"
+                            else:
+                                btn_label = f"🏁 **{r_no}R** (締切 {d_time})\n\n🎯 {b_cnt}点 ({t_bet:,}円)\n\n予想: {min_p:+,}円"
+
                             if st.button(btn_label, key=f"hit_grid_{r_item['race_id']}", use_container_width=True):
                                 st.session_state.selected_hit_race = r_item['race_id']
                                 st.rerun()
