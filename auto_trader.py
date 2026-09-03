@@ -120,7 +120,7 @@ class BoatRaceScraper:
             try:
                 resp = session.get(url, timeout=timeout)
                 resp.raise_for_status()
-                resp.encoding = resp.apparent_encoding or 'utf-8'
+                resp.encoding = 'utf-8'
                 return BeautifulSoup(resp.text, 'html.parser')
             except Exception as e:
                 if attempt < max_retries - 1:
