@@ -114,18 +114,16 @@ class BoatRaceScraper:
         return cls._session
 
     @classmethod
-    def get_soup(cls, url: str, timeout: int = 20, max_retries: int = 3) -> Optional[BeautifulSoup]:
+    def get_soup(cls, url: str, timeout: int = 10, max_retries: int = 2) -> Optional[BeautifulSoup]:
         session = cls.get_session()
         for attempt in range(max_retries):
             try:
                 resp = session.get(url, timeout=timeout)
                 resp.raise_for_status()
-                resp.encoding = 'utf-8'
-                return BeautifulSoup(resp.text, 'html.parser')
+                return BeautifulSoup(resp.content, 'html.parser', from_encoding='utf-8')
             except Exception as e:
                 if attempt < max_retries - 1:
-                    logger.debug(f"データ取得リトライ ({attempt+1}/{max_retries}) [{url}]: {e}")
-                    time.sleep(1.0)
+                    time.sleep(0.5)
                 else:
                     logger.warning(f"データ取得失敗 ({url}): {e}")
         return None
@@ -1625,22 +1623,26 @@ def evaluate_race(
         except Exception as e:
             logger.warning(f"的中特化データの保存エラー: {e}")
 
-    # 12. Supabase DB保存 & Discord通知 (黄金ベースライン / 投資GOのみ)
-    # 【重要】Sniper Filterを通過した投資GOの場合のみ実行！見送り時は絶対にDBに保存しない！
+    # 12. Supabase DB保存 & Discord通知 (黄金ベースライン)
+    # 本番用の race_predictions テーブルへ全評価レースの推論結果・判定ステータスを保存（INSERT/UPSERT）
+    try:
+        db_manager.save_race_prediction(
+            race_id=race_id, race_date=date_str, venue_code=venue_code,
+            venue_name=venue_name, race_no=race_no, deadline_time=deadline_str,
+            top_boat=top_boat, max_p1=max_p1, prob_gap=prob_gap, gatekeeper_passed=gatekeeper_passed,
+            cluster_id=cluster_id, cluster_name=cluster_name, status=status,
+            source="auto"
+        )
+    except Exception as e:
+        logger.error(f"Supabaseへの推論結果保存エラー: {e}")
+
     if is_investment_go:
         total_bet = sum(bets.values())
         logger.info(f"🚀🚀🚀 [{venue_name} {race_no}R] 投資GOサイン点灯！ 推奨買い目: {len(bets)}点 / 総投資額: {total_bet:,}円")
         try:
-            db_manager.save_race_prediction(
-                race_id=race_id, race_date=date_str, venue_code=venue_code,
-                venue_name=venue_name, race_no=race_no, deadline_time=deadline_str,
-                top_boat=top_boat, max_p1=max_p1, prob_gap=prob_gap, gatekeeper_passed=True,
-                cluster_id=cluster_id, cluster_name=cluster_name, status="investment_go",
-                source="auto"
-            )
             db_manager.save_recommended_bets(race_id, bets, benter_probs_dict, all_odds)
         except Exception as e:
-            logger.error(f"Supabaseへの推論結果保存エラー: {e}")
+            logger.error(f"Supabaseへの推奨買い目保存エラー: {e}")
         
         send_discord_notification(
             webhook_url=webhook_url,
@@ -1661,7 +1663,7 @@ def evaluate_race(
             dry_run=dry_run
         )
     else:
-        logger.info(f"[{venue_name} {race_no}R] {status_message} (インメモリ計算完了 -> race_predictions 保存なし)")
+        logger.info(f"[{venue_name} {race_no}R] {status_message} (ステータス保存完了: {status})")
 
     return {
         'status': status,
@@ -2118,19 +2120,24 @@ def evaluate_mock_race(
         except Exception as e:
             logger.warning(f"MOCK的中特化データの保存エラー: {e}")
     
-    # Supabase 保存 (投資GOの場合のみ)
+    # Supabase 保存 (推論結果・ステータス)
+    mock_status = f"mock_{status}" if not status.startswith("mock_") else status
+    try:
+        db_manager.save_race_prediction(
+            race_id=race_id, race_date=date_str, venue_code=venue_code,
+            venue_name=v_name, race_no=race_no, deadline_time="15:25 (MOCK)",
+            top_boat=top_boat, max_p1=max_p1, prob_gap=prob_gap, gatekeeper_passed=gatekeeper_passed,
+            cluster_id=cluster_id, cluster_name=cluster_name, status=mock_status,
+            source="auto"
+        )
+    except Exception as e:
+        logger.warning(f"MOCK推論結果のDB保存例外: {e}")
+
     if is_investment_go:
         try:
-            db_manager.save_race_prediction(
-                race_id=race_id, race_date=date_str, venue_code=venue_code,
-                venue_name=v_name, race_no=race_no, deadline_time="15:25 (MOCK)",
-                top_boat=top_boat, max_p1=max_p1, prob_gap=prob_gap, gatekeeper_passed=True,
-                cluster_id=cluster_id, cluster_name=cluster_name, status="mock_investment_go",
-                source="auto"
-            )
             db_manager.save_recommended_bets(race_id, bets, benter_probs_dict, all_odds)
         except Exception as e:
-            logger.warning(f"MOCK推論結果のDB保存例外: {e}")
+            logger.warning(f"MOCK推奨買い目のDB保存例外: {e}")
         
         send_discord_notification(
             webhook_url=webhook_url,
@@ -2151,7 +2158,7 @@ def evaluate_mock_race(
             dry_run=dry_run
         )
     else:
-        logger.info(f"[MOCK] 見送りレースのため DB保存 & Discord送信 はスキップされました。")
+        logger.info(f"[MOCK] 見送りレース ({status}): ステータス保存完了 (買い目保存 & Discord送信はスキップ)")
         
     return {
         'status': status,
@@ -2194,13 +2201,24 @@ def register_daily_schedules(
     skipped_cluster1 = 0
     already_passed = 0
     
+    target_venues = [(vcode, vname) for vcode, vname in venues if vcode not in CLUSTER_1_VENUES]
+    skipped_cluster1 = len(venues) - len(target_venues)
     for vcode, vname in venues:
         if vcode in CLUSTER_1_VENUES:
-            skipped_cluster1 += 1
             logger.info(f"  ・[{vcode:02d}] {vname:<4}: 【難水面 (Cluster 1) 除外】 登録スキップ")
-            continue
-            
-        races = fetch_venue_race_deadlines(today_str, vcode)
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    venue_deadlines = {}
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        future_to_v = {executor.submit(fetch_venue_race_deadlines, today_str, vc): (vc, vn) for vc, vn in target_venues}
+        for future in as_completed(future_to_v):
+            vc, vn = future_to_v[future]
+            try:
+                venue_deadlines[(vc, vn)] = future.result()
+            except Exception:
+                venue_deadlines[(vc, vn)] = []
+                
+    for (vcode, vname), races in venue_deadlines.items():
         if not races:
             continue
             
