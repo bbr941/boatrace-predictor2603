@@ -252,6 +252,15 @@ class BoatRaceScraper:
                     text = r.get_text(separator=' ', strip=True)
                     if '3連単' in text:
                         cells = [c.get_text(strip=True) for c in r.find_all(['td', 'th'])]
+                        
+                        # 不成立・返還・中止の検出
+                        if any(w in c for c in cells for w in ['不成立', '中止', '返還', '特払い']):
+                            return {
+                                'combo': '不成立',
+                                'payout_per_100': 100,
+                                'is_cancelled': True
+                            }
+                            
                         combo = None
                         payout = None
                         for c in cells:
@@ -266,8 +275,18 @@ class BoatRaceScraper:
                         if combo and payout is not None:
                             return {
                                 'combo': combo,
-                                'payout_per_100': payout
+                                'payout_per_100': payout,
+                                'is_cancelled': False
                             }
+            
+            # レース全体の中止・不成立検出
+            page_text = soup.get_text()
+            if 'レース中止' in page_text or '中止順延' in page_text or '不成立' in page_text:
+                return {
+                    'combo': '不成立',
+                    'payout_per_100': 100,
+                    'is_cancelled': True
+                }
         except Exception as e:
             logger.debug(f"結果パースエラー ({url}): {e}")
         return None
@@ -1786,19 +1805,26 @@ def settle_race_results(
                 
             # 投資ありレースの的中判定
             total_bet = sum(b['bet_amount'] for b in bets)
-            hit_bet = next((b for b in bets if b['combination'] == combo), None)
-            
-            if hit_bet:
-                bet_amt = hit_bet['bet_amount']
-                actual_payout = int((bet_amt / 100.0) * payout_per_100)
-                profit = actual_payout - total_bet
-                hit_status = "hit"
-                logger.info(f"🎉🎉🎉 [🎯Sniper的中!] {venue_name} {race_no}R: 結果 {combo} | 投資: {total_bet:,}円 -> 払戻: {actual_payout:,}円 (純利益: {profit:+,}円)")
+            is_cancelled = res.get('is_cancelled', False) or combo == '不成立'
+
+            if is_cancelled:
+                actual_payout = total_bet
+                profit = 0
+                hit_status = "refund"
+                logger.info(f"🔄 [Sniper返還] {venue_name} {race_no}R: 結果 {combo} | 投資: {total_bet:,}円 -> 全額返還 (収支: 0円)")
             else:
-                actual_payout = 0
-                profit = - total_bet
-                hit_status = "miss"
-                logger.info(f"❌ [Sniper不的中] {venue_name} {race_no}R: 結果 {combo} | 投資: {total_bet:,}円 -> 払戻: 0円 (損失: {profit:,}円)")
+                hit_bet = next((b for b in bets if b['combination'] == combo), None)
+                if hit_bet:
+                    bet_amt = hit_bet['bet_amount']
+                    actual_payout = int((bet_amt / 100.0) * payout_per_100)
+                    profit = actual_payout - total_bet
+                    hit_status = "hit"
+                    logger.info(f"🎉🎉🎉 [🎯Sniper的中!] {venue_name} {race_no}R: 結果 {combo} | 投資: {total_bet:,}円 -> 払戻: {actual_payout:,}円 (純利益: {profit:+,}円)")
+                else:
+                    actual_payout = 0
+                    profit = - total_bet
+                    hit_status = "miss"
+                    logger.info(f"❌ [Sniper不的中] {venue_name} {race_no}R: 結果 {combo} | 投資: {total_bet:,}円 -> 払戻: 0円 (損失: {profit:,}円)")
                 
             db_manager.update_race_result(
                 race_id=race_id,
@@ -1864,19 +1890,26 @@ def settle_race_results(
                 continue
                 
             total_bet = sum(b['bet_amount'] for b in bets)
-            hit_bet = next((b for b in bets if b['combination'] == combo), None)
-            
-            if hit_bet:
-                bet_amt = hit_bet['bet_amount']
-                actual_payout = int((bet_amt / 100.0) * payout_per_100)
-                profit = actual_payout - total_bet
-                hit_status = "hit"
-                logger.info(f"💮 [🎯的中特化 的中!] {venue_name} {race_no}R: 結果 {combo} | 投資: {total_bet:,}円 -> 払戻: {actual_payout:,}円 (純利益: {profit:+,}円)")
+            is_cancelled = res.get('is_cancelled', False) or combo == '不成立'
+
+            if is_cancelled:
+                actual_payout = total_bet
+                profit = 0
+                hit_status = "refund"
+                logger.info(f"🔄 [的中特化 返還] {venue_name} {race_no}R: 結果 {combo} | 投資: {total_bet:,}円 -> 全額返還 (収支: 0円)")
             else:
-                actual_payout = 0
-                profit = - total_bet
-                hit_status = "miss"
-                logger.info(f"💀 [的中特化 不的中] {venue_name} {race_no}R: 結果 {combo} | 投資: {total_bet:,}円 -> 払戻: 0円 (損失: {profit:,}円)")
+                hit_bet = next((b for b in bets if b['combination'] == combo), None)
+                if hit_bet:
+                    bet_amt = hit_bet['bet_amount']
+                    actual_payout = int((bet_amt / 100.0) * payout_per_100)
+                    profit = actual_payout - total_bet
+                    hit_status = "hit"
+                    logger.info(f"💮 [🎯的中特化 的中!] {venue_name} {race_no}R: 結果 {combo} | 投資: {total_bet:,}円 -> 払戻: {actual_payout:,}円 (純利益: {profit:+,}円)")
+                else:
+                    actual_payout = 0
+                    profit = - total_bet
+                    hit_status = "miss"
+                    logger.info(f"💀 [的中特化 不的中] {venue_name} {race_no}R: 結果 {combo} | 投資: {total_bet:,}円 -> 払戻: 0円 (損失: {profit:,}円)")
                 
             db_manager.update_hit_focused_result(
                 race_id=race_id,
