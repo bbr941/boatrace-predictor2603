@@ -26,6 +26,8 @@ import schedule
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
+import warnings
+warnings.filterwarnings('ignore', category=pd.errors.PerformanceWarning)
 
 # 環境変数の読み込み (.env があればロード)
 try:
@@ -875,7 +877,7 @@ class FeatureEngineer:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
 
 
-        return df
+        return df.copy()
 
 
 def prepare_features_for_model(df_feat: pd.DataFrame, model: lgb.Booster) -> pd.DataFrame:
