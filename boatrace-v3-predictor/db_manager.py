@@ -53,7 +53,8 @@ except ImportError:
 import sqlite3
 
 DATABASE_URL = get_database_url()
-SQLITE_DB_PATH = 'boatrace.db'
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+SQLITE_DB_PATH = os.path.join(CURRENT_DIR, 'boatrace.db')
 
 
 def parse_database_url(url: str) -> Dict[str, Any]:

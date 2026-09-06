@@ -63,9 +63,10 @@ logging.basicConfig(
 logger = logging.getLogger("AutoTrader")
 
 # 定数 & パス設定
-MODEL_HONMEI_PATH = 'model_honmei.txt'
-MODEL_RESIDUAL_PATH = 'model_residual.txt'
-DATA_DIR = 'app_data'
+BASE_DIR = CURRENT_DIR
+MODEL_HONMEI_PATH = os.path.join(BASE_DIR, 'model_honmei.txt')
+MODEL_RESIDUAL_PATH = os.path.join(BASE_DIR, 'model_residual.txt')
+DATA_DIR = os.path.join(BASE_DIR, 'app_data')
 CLUSTER_1_VENUES = [2, 3, 4, 14, 22]  # 戸田02, 江戸川03, 平和島04, 鳴門14, 福岡22
 
 HEADERS = {
@@ -535,7 +536,7 @@ def fetch_series_momentum(venue_code: int, racer_ids: list, race_date: str = Non
     if not racer_ids:
         return momentum_dict
 
-    sqlite_paths = ['boatrace.db', r'D:\BOAT2504_Base_line\BOAT2504_DB\boatrace.db']
+    sqlite_paths = [os.path.join(BASE_DIR, 'boatrace.db'), r'D:\BOAT2504_Base_line\BOAT2504_DB\boatrace.db']
     sqlite_db = None
     for sp in sqlite_paths:
         if os.path.exists(sp):
