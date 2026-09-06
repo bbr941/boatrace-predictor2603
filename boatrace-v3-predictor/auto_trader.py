@@ -114,7 +114,7 @@ class BoatRaceScraper:
         return cls._session
 
     @classmethod
-    def get_soup(cls, url: str, timeout: int = 10, max_retries: int = 2) -> Optional[BeautifulSoup]:
+    def get_soup(cls, url: str, timeout: int = 15, max_retries: int = 3) -> Optional[BeautifulSoup]:
         session = cls.get_session()
         for attempt in range(max_retries):
             try:
@@ -123,7 +123,7 @@ class BoatRaceScraper:
                 return BeautifulSoup(resp.content, 'html.parser', from_encoding='utf-8')
             except Exception as e:
                 if attempt < max_retries - 1:
-                    time.sleep(0.5)
+                    time.sleep(1.0)
                 else:
                     logger.warning(f"データ取得失敗 ({url}): {e}")
         return None
@@ -651,19 +651,25 @@ class FeatureEngineer:
     @staticmethod
     def process(df: pd.DataFrame, venue_name: str, race_date: str = None) -> pd.DataFrame:
         df['venue_name'] = venue_name
+        
+        # 1. 選手IDと進入コースの安全な型変換（NaN/Noneによる例外を防止）
+        df['racer_id'] = pd.to_numeric(df.get('racer_id', 9999), errors='coerce').fillna(9999).astype(int)
+        if 'pred_course' in df.columns:
+            df['pred_course'] = pd.to_numeric(df['pred_course'], errors='coerce').fillna(df.get('boat_number', 1)).astype(int)
+        else:
+            df['pred_course'] = pd.to_numeric(df.get('boat_number', 1), errors='coerce').fillna(1).astype(int)
+
         try:
             r_course = pd.read_csv(os.path.join(DATA_DIR, 'static_racer_course.csv'))
             r_venue = pd.read_csv(os.path.join(DATA_DIR, 'static_racer_venue.csv'))
             v_course = pd.read_csv(os.path.join(DATA_DIR, 'static_venue_course.csv'))
             r_params = pd.read_csv(os.path.join(DATA_DIR, 'static_racer_params.csv'))
             
-            df['racer_id'] = df['racer_id'].astype(int)
-            df['pred_course'] = df['pred_course'].astype(int)
-            r_course['RacerID'] = r_course['RacerID'].astype(int)
-            r_course['Course'] = r_course['Course'].astype(int)
-            r_venue['RacerID'] = r_venue['RacerID'].astype(int)
-            v_course['course_number'] = v_course['course_number'].astype(int)
-            r_params['racer_id'] = r_params['racer_id'].astype(int)
+            r_course['RacerID'] = pd.to_numeric(r_course['RacerID'], errors='coerce').fillna(0).astype(int)
+            r_course['Course'] = pd.to_numeric(r_course['Course'], errors='coerce').fillna(0).astype(int)
+            r_venue['RacerID'] = pd.to_numeric(r_venue['RacerID'], errors='coerce').fillna(0).astype(int)
+            v_course['course_number'] = pd.to_numeric(v_course['course_number'], errors='coerce').fillna(0).astype(int)
+            r_params['racer_id'] = pd.to_numeric(r_params['racer_id'], errors='coerce').fillna(0).astype(int)
 
             df = df.merge(r_course, left_on=['racer_id', 'pred_course'], right_on=['RacerID', 'Course'], how='left')
             df.rename(columns={
@@ -698,14 +704,36 @@ class FeatureEngineer:
             elif 'WinRate' in df.columns:
                  df['local_win_rate'] = df['WinRate']
 
-            df = df.merge(v_course, left_on=['venue_name', 'pred_course'], right_on=['venue_name', 'course_number'], how='left')
+            df = df.merge(v_course, left_on=['venue_code_int', 'pred_course'], right_on=['venue_code', 'course_number'], how='left')
             df.rename(columns={'rate_1st': 'venue_course_1st_rate', 'rate_2nd': 'venue_course_2nd_rate', 'rate_3rd': 'venue_course_3rd_rate'}, inplace=True)
             df = df.merge(r_params, on='racer_id', how='left')
-        except Exception: pass
+        except Exception as e:
+            logger.warning(f"⚠️ 静的マスタ特徴量マージ例外 (デフォルト値で補完します): {e}")
         
-        required_cols = ['makuri_count', 'nige_count', 'sashi_count', 'makurizashi_count', 'nat_win_rate', 'course_run_count', 'local_win_rate']
-        for c in required_cols:
-            if c not in df.columns: df[c] = 0.0
+        # 2. 静的特徴量の確実なデフォルト値補完 (マージ失敗時や未登録選手対策)
+        default_feature_cols = {
+            'makuri_count': 0.0,
+            'nige_count': 0.0,
+            'sashi_count': 0.0,
+            'makurizashi_count': 0.0,
+            'nat_win_rate': 0.0,
+            'course_run_count': 0.0,
+            'local_win_rate': 0.0,
+            'course_quinella_rate': 0.0,
+            'course_trifecta_rate': 0.0,
+            'course_1st_rate': 0.0,
+            'course_avg_st': 0.20,
+            'venue_course_1st_rate': 0.0,
+            'venue_course_2nd_rate': 0.0,
+            'venue_course_3rd_rate': 0.0,
+            'wall_strength': 0.0,
+            'follow_potential': 0.0
+        }
+        for c, def_val in default_feature_cols.items():
+            if c not in df.columns:
+                df[c] = def_val
+            else:
+                df[c] = df[c].fillna(def_val)
             
         def parse_prior(x):
             if isinstance(x, (int, float)): return float(x)
@@ -718,43 +746,48 @@ class FeatureEngineer:
             except Exception: pass
             return 3.5
             
-        df['series_avg_rank'] = df['prior_results'].apply(parse_prior)
+        df['series_avg_rank'] = df['prior_results'].apply(parse_prior) if 'prior_results' in df.columns else 3.5
         denom = df['course_run_count'].replace(0, 1)
         df['makuri_rate'] = df['makuri_count'] / denom
         df['nige_rate'] = df['nige_count'] / denom
         df['sashi_rate'] = df.get('sashi_count', 0.0) / denom
         df['makurizashi_rate'] = df.get('makurizashi_count', 0.0) / denom
 
-
         # Advanced Features
         df = add_advanced_features(df)
         df = df.sort_values('pred_course')
         st_col = 'corrected_st' if 'corrected_st' in df.columns else 'exhibition_start_timing'
         
-        df['inner_st'] = df[st_col].shift(1).fillna(0)
-        df['inner_st_gap'] = df[st_col] - df['inner_st']
-        df['outer_st'] = df[st_col].shift(-1).fillna(0)
+        df['inner_st'] = df[st_col].shift(1).fillna(0) if st_col in df.columns else 0.0
+        df['inner_st_gap'] = df[st_col] - df['inner_st'] if st_col in df.columns else 0.0
+        df['outer_st'] = df[st_col].shift(-1).fillna(0) if st_col in df.columns else 0.0
         avg_neighbor = (df['inner_st'] + df['outer_st']) / 2
-        df['slit_formation'] = df[st_col] - avg_neighbor
+        df['slit_formation'] = df[st_col] - avg_neighbor if st_col in df.columns else 0.0
 
         c1_nige = df.loc[df['pred_course']==1, 'nige_rate']
         val = c1_nige.values[0] if len(c1_nige) > 0 else 0.5
         df['anti_nige_potential'] = df['makuri_rate'] * (1 - val)
         
-        df['wall_strength'] = df['course_quinella_rate'].shift(1).fillna(0)
-        df['follow_potential'] = df['makuri_rate'].shift(1).fillna(0) * df['course_quinella_rate']
+        # 安全な wall_strength & follow_potential 算出
+        quinella_s = df['course_quinella_rate'].fillna(0.0)
+        df['wall_strength'] = quinella_s.shift(1).fillna(0.0)
+        df['follow_potential'] = df['makuri_rate'].shift(1).fillna(0.0) * quinella_s
         
-        min_t = df['exhibition_time'].min()
-        mean_t = df['exhibition_time'].mean()
-        std_t = df['exhibition_time'].std()
+        min_t = df['exhibition_time'].min() if 'exhibition_time' in df.columns else 6.8
+        if pd.isna(min_t): min_t = 6.8
+        mean_t = df['exhibition_time'].mean() if 'exhibition_time' in df.columns else 6.8
+        if pd.isna(mean_t): mean_t = 6.8
+        std_t = df['exhibition_time'].std() if 'exhibition_time' in df.columns else 1.0
         if std_t == 0 or np.isnan(std_t): std_t = 1.0
-        df['tenji_z_score'] = (mean_t - df['exhibition_time']) / std_t
-        df['linear_rank'] = df['exhibition_time'].rank(method='min', ascending=True)
+        
+        ex_time_s = df['exhibition_time'].fillna(mean_t) if 'exhibition_time' in df.columns else pd.Series(mean_t, index=df.index)
+        df['tenji_z_score'] = (mean_t - ex_time_s) / std_t
+        df['linear_rank'] = ex_time_s.rank(method='min', ascending=True)
         df['is_linear_leader'] = (df['linear_rank'] == 1).astype(int)
 
         # 新規代替モメンタム & レース内展示偏差
-        df['ex_diff_from_race_min'] = (df['exhibition_time'] - min_t).fillna(0.0)
-        df['ex_diff_from_race_mean'] = (df['exhibition_time'] - mean_t).fillna(0.0)
+        df['ex_diff_from_race_min'] = (ex_time_s - min_t).fillna(0.0)
+        df['ex_diff_from_race_mean'] = (ex_time_s - mean_t).fillna(0.0)
         df['ex_rank_in_race'] = df['linear_rank']
         
         # 節間展示タイムモメンタム（動的DBクエリ結果をマッピング）
@@ -2312,7 +2345,10 @@ def run_worker_loop(
     logger.info("⏳ 待機ループ開始... (Ctrl+C で停止)")
     try:
         while True:
-            schedule.run_pending()
+            try:
+                schedule.run_pending()
+            except Exception as e:
+                logger.error(f"⚠️ スケジューラージョブ実行中に例外が発生しました（監視ループを継続します）: {e}", exc_info=True)
             time.sleep(1)
     except KeyboardInterrupt:
         logger.info("🛑 ワーカーを正常に停止しました。")
