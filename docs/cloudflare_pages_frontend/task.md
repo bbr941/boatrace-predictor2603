@@ -1,0 +1,27 @@
+# タスクリスト: Cloudflare Pages向け超高速フロントエンド構築
+
+- [x] 1. プロジェクトの調査と計画策定 <!-- id: 0 -->
+  - [x] 既存Supabaseスキーマ・データの調査 <!-- id: 1 -->
+  - [x] 実装計画（implementation_plan.md）の作成 <!-- id: 2 -->
+- [x] 2. フロントエンド基盤の初期化 (`frontend/`) <!-- id: 3 -->
+  - [x] Vite (React + TypeScript) + Tailwind CSS の構成 <!-- id: 4 -->
+  - [x] `@supabase/supabase-js`, `lucide-react` のインストール <!-- id: 5 -->
+  - [x] 環境変数設定 (`.env`, `.env.example`) <!-- id: 6 -->
+- [x] 3. Supabase クライアントとデータ型・APIサービスの実装 <!-- id: 7 -->
+  - [x] Supabaseクライアント (`src/lib/supabase.ts`) <!-- id: 8 -->
+  - [x] TypeScript型定義 (`src/types/index.ts`) <!-- id: 9 -->
+  - [x] データ取得サービス (`src/services/api.ts`) <!-- id: 10 -->
+  - [x] Supabase RLS SELECT ポリシー用マイグレーションスクリプト適用 <!-- id: 11 -->
+- [x] 4. UIコンポーネントの実装 <!-- id: 12 -->
+  - [x] ヘッダー・日付選択・モード切替・更新ボタン (`Header.tsx`) <!-- id: 13 -->
+  - [x] プール型変則2連コロガシ戦略ボード (`StrategyGuide.tsx`) <!-- id: 14 -->
+  - [x] KPI集計バー (`SummaryStats.tsx`) <!-- id: 15 -->
+  - [x] 会場別ボタングリッドパネル (`VenueGrid.tsx`, `RaceButton.tsx`) <!-- id: 16 -->
+  - [x] 買い目詳細モーダル (`RaceDetailModal.tsx`) <!-- id: 17 -->
+  - [x] メインアプリケーション結合 (`App.tsx`, `index.css`) <!-- id: 18 -->
+- [x] 5. ビルド・デプロイ設定 & ドキュメント作成 <!-- id: 19 -->
+  - [x] `npm run build` による本番ビルド検証 (`frontend/dist/`) <!-- id: 20 -->
+  - [x] `CLOUDFLARE_DEPLOY.md` の作成 <!-- id: 21 -->
+- [x] 6. 動作検証とウォークスルー作成 <!-- id: 22 -->
+  - [x] ローカル起動およびレスポンシブ表示・データ取得確認 <!-- id: 23 -->
+  - [x] `walkthrough.md` の作成 <!-- id: 24 -->
