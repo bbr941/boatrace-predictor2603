@@ -11,7 +11,7 @@ interface RaceButtonProps {
 export const RaceButton: React.FC<RaceButtonProps> = ({ race, isSelected, onClick }) => {
   const isResolved = race.is_resolved;
   const hitStatus = race.hit_status;
-  const isGo = race.status.includes('go') || (race as any).gatekeeper_passed;
+  const isGo = race.status.includes('go');
   const profit = race.profit || 0;
   const totalBet = race.total_bet || 1000;
   const betsCount = race.bets_count || 5;
@@ -44,12 +44,13 @@ export const RaceButton: React.FC<RaceButtonProps> = ({ race, isSelected, onClic
       // 💀 ハズレ (落ち着いたダークトーン)
       cardStyle = "bg-slate-950/80 border-slate-800/90 text-slate-400 hover:border-slate-700 hover:bg-slate-900/60";
       badgeStyle = "text-slate-500 bg-slate-900 border border-slate-800";
+      const lossAmount = Math.abs(profit) || totalBet;
       contentNode = (
         <div className="flex flex-col items-center justify-center py-1">
           <div className="flex items-center space-x-1 text-xs font-medium text-slate-400">
             <span>💀 収支:</span>
             <span className="font-mono font-semibold text-rose-400/90">
-              {profit === 0 ? `-${totalBet.toLocaleString()}` : `${profit.toLocaleString()}`}円
+              -{lossAmount.toLocaleString()}円
             </span>
           </div>
           {race.actual_result && (
@@ -60,10 +61,17 @@ export const RaceButton: React.FC<RaceButtonProps> = ({ race, isSelected, onClic
         </div>
       );
     } else {
-      // 確定済みだが非参戦
+      // 確定済みだが非参戦（見送り終了）
+      cardStyle = "bg-slate-950/40 border-slate-900 text-slate-600 hover:border-slate-800";
+      badgeStyle = "text-slate-600 bg-slate-950 border border-slate-900";
       contentNode = (
-        <div className="text-center py-1">
+        <div className="flex flex-col items-center justify-center py-1">
           <span className="text-xs text-slate-500">見送り終了</span>
+          {race.actual_result && (
+            <span className="text-[10px] text-slate-600 font-mono">
+              結果: {race.actual_result}
+            </span>
+          )}
         </div>
       );
     }
@@ -89,7 +97,9 @@ export const RaceButton: React.FC<RaceButtonProps> = ({ race, isSelected, onClic
       badgeStyle = "text-slate-600 bg-slate-950 border border-slate-900";
       contentNode = (
         <div className="text-center py-1.5">
-          <span className="text-xs text-slate-600">見送り (Pass)</span>
+          <span className="text-xs text-slate-600">
+            {race.status === 'gatekeeper_skipped' ? 'GK見送り' : '見送り (Pass)'}
+          </span>
         </div>
       );
     }
@@ -125,7 +135,9 @@ export const RaceButton: React.FC<RaceButtonProps> = ({ race, isSelected, onClic
           {race.cluster_name || '標準'}
         </span>
         <span className={`px-1.5 py-0.2 rounded text-[9px] font-medium ${badgeStyle}`}>
-          {isResolved ? (hitStatus === 'hit' ? '的中' : 'ハズレ') : (isGo ? '投資GO' : '見送り')}
+          {isResolved
+            ? (hitStatus === 'hit' ? '的中' : (hitStatus === 'miss' ? 'ハズレ' : '見送り'))
+            : (isGo ? '投資GO' : '見送り')}
         </span>
       </div>
     </button>

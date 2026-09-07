@@ -73,9 +73,13 @@ export const RaceDetailModal: React.FC<RaceDetailModalProps> = ({ race, mode, on
 
   const isResolved = race.is_resolved;
   const isHit = race.hit_status === 'hit';
-  const totalBet = race.total_bet || bets.reduce((s, b) => s + b.bet_amount, 0) || 1000;
-  const payout = race.payout || 0;
-  const profit = race.profit || (isResolved ? (isHit ? payout - totalBet : -totalBet) : 0);
+  const isMiss = race.hit_status === 'miss';
+  const isInvested = race.status.includes('go') || isHit || isMiss;
+  const totalBet = isInvested ? (race.total_bet || bets.reduce((s, b) => s + b.bet_amount, 0) || 1000) : 0;
+  const payout = isInvested ? (race.payout || 0) : 0;
+  const profit = isInvested
+    ? (typeof race.profit === 'number' ? race.profit : (isResolved ? (isHit ? payout - totalBet : -totalBet) : 0))
+    : 0;
 
   // Calculate synthetic odds: 1 / sum(1 / odds)
   const syntheticOdds = bets.length > 0
@@ -129,6 +133,8 @@ export const RaceDetailModal: React.FC<RaceDetailModalProps> = ({ race, mode, on
               className={`p-3.5 rounded-xl border flex items-center justify-between ${
                 isHit
                   ? 'bg-emerald-950/60 border-emerald-500/50 text-emerald-200'
+                  : isMiss
+                  ? 'bg-rose-950/40 border-rose-800/50 text-rose-300'
                   : 'bg-slate-950 border-slate-800 text-slate-400'
               }`}
             >
@@ -137,13 +143,19 @@ export const RaceDetailModal: React.FC<RaceDetailModalProps> = ({ race, mode, on
                   <div className="p-2 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/40">
                     <CheckCircle className="w-5 h-5" />
                   </div>
+                ) : isMiss ? (
+                  <div className="p-2 rounded-full bg-rose-900/40 text-rose-400 border border-rose-700/50">
+                    <AlertCircle className="w-5 h-5" />
+                  </div>
                 ) : (
                   <div className="p-2 rounded-full bg-slate-800 text-slate-400 border border-slate-700">
                     <AlertCircle className="w-5 h-5" />
                   </div>
                 )}
                 <div>
-                  <div className="text-xs text-slate-400 font-semibold">確定着順</div>
+                  <div className="text-xs text-slate-400 font-semibold">
+                    {isInvested ? '確定着順' : 'レース結果（見送り）'}
+                  </div>
                   <div className="text-lg font-bold font-mono text-white flex items-center gap-2">
                     {race.actual_result ? (
                       <CombinationDisplay combo={race.actual_result} />
@@ -162,12 +174,14 @@ export const RaceDetailModal: React.FC<RaceDetailModalProps> = ({ race, mode, on
                       ? 'text-emerald-400'
                       : profit < 0
                       ? 'text-rose-400'
-                      : 'text-slate-300'
+                      : 'text-slate-400'
                   }`}
                 >
-                  {profit > 0 ? `+${profit.toLocaleString()}` : profit.toLocaleString()}円
+                  {isInvested
+                    ? (profit > 0 ? `+${profit.toLocaleString()}` : `${profit.toLocaleString()}円`)
+                    : '0円 (見送り)'}
                 </div>
-                {payout > 0 && (
+                {payout > 0 && isInvested && (
                   <div className="text-[11px] text-slate-400 font-mono">
                     払戻: {payout.toLocaleString()}円
                   </div>

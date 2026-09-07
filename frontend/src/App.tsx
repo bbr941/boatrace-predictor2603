@@ -42,11 +42,17 @@ export const App: React.FC = () => {
     return () => clearInterval(interval);
   }, [loadData]);
 
+  // Helper: check if a race is an actual investment race (not skipped / passed)
+  const isInvestmentRace = (r: HitFocusedPrediction | RacePrediction): boolean => {
+    // Only GO sign races or races that actually had bets settled as hit/miss
+    return r.status.includes('go') || r.hit_status === 'hit' || r.hit_status === 'miss';
+  };
+
   // Compute stats for current mode & date
   const stats = useMemo<DashboardStats>(() => {
     const totalRaces = races.length;
-    // Investment target races
-    const targetRaces = races.filter((r) => r.status.includes('go') || (r as any).gatekeeper_passed);
+    // Investment target races (only actual GO or bet races)
+    const targetRaces = races.filter(isInvestmentRace);
     const investmentRaces = targetRaces.length;
 
     // Resolved among investment races
@@ -57,9 +63,24 @@ export const App: React.FC = () => {
     const missCount = resolvedTargets.filter((r) => r.hit_status === 'miss').length;
     const hitRate = (hitCount + missCount) > 0 ? (hitCount / (hitCount + missCount)) * 100 : 0;
 
-    const totalBet = resolvedTargets.reduce((sum, r) => sum + (r.total_bet || 1000), 0);
+    // Total bet: only count resolved investment races
+    const totalBet = resolvedTargets.reduce((sum, r) => sum + (r.total_bet || (typeof r.profit === 'number' && r.profit < 0 ? Math.abs(r.profit) : 1000)), 0);
     const totalPayout = resolvedTargets.reduce((sum, r) => sum + (r.payout || 0), 0);
-    const netProfit = resolvedTargets.reduce((sum, r) => sum + (r.profit || (r.hit_status === 'hit' ? (r.payout || 0) - (r.total_bet || 1000) : -(r.total_bet || 1000))), 0);
+    
+    // Net profit: strictly sum profits of resolved investment races
+    const netProfit = resolvedTargets.reduce((sum, r) => {
+      if (typeof r.profit === 'number') {
+        return sum + r.profit;
+      }
+      if (r.hit_status === 'hit') {
+        return sum + ((r.payout || 0) - (r.total_bet || 1000));
+      }
+      if (r.hit_status === 'miss') {
+        return sum - (r.total_bet || 1000);
+      }
+      return sum;
+    }, 0);
+
     const recoveryRate = totalBet > 0 ? (totalPayout / totalBet) * 100 : 0;
 
     return {

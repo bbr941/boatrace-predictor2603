@@ -48,7 +48,10 @@ export const VenueGrid: React.FC<VenueGridProps> = ({ races, selectedRaceId, onS
       {groupedVenues.map(({ venueCode, venueName, races: venueRaces }) => {
         // Venue total profit and hits
         const hits = venueRaces.filter(r => r.hit_status === 'hit').length;
-        const venueProfit = venueRaces.reduce((sum, r) => sum + (r.profit || 0), 0);
+        const venueProfit = venueRaces
+          .filter(r => r.status.includes('go') || r.hit_status === 'hit' || r.hit_status === 'miss')
+          .reduce((sum, r) => sum + (typeof r.profit === 'number' ? r.profit : (r.hit_status === 'hit' ? (r.payout || 0) - (r.total_bet || 1000) : (r.hit_status === 'miss' ? -(r.total_bet || 1000) : 0))), 0);
+
 
         return (
           <div
