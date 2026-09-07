@@ -38,3 +38,7 @@ catboost_info/
 # Secrets
 .env
 .env.local
+
+# Nested old repos
+boatrace-predictor2512/
+boatrace-predictor2512_new/
