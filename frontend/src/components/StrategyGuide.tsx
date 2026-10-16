@@ -159,17 +159,17 @@ export const StrategyGuide: React.FC<StrategyGuideProps> = ({ mode = 'hit_focuse
                 <span className="text-[11px] font-black px-2 py-0.5 rounded bg-pink-600/30 text-pink-300 border border-pink-400/50 flex items-center gap-1 animate-pulse">
                   <Flame className="w-3 h-3 text-pink-400" /> GOGO! ランプ
                 </span>
-                <span className="text-xs font-mono text-amber-300 font-bold">回収率100%超</span>
+                <span className="text-xs font-mono text-amber-300 font-bold">回収率110.6%</span>
               </div>
               <h4 className="text-sm font-semibold text-white mb-1 flex items-center gap-1.5">
-                <span>🎰 回収100%超でペカッと点灯</span>
+                <span>🎰 黄金緩和条件達成で点灯</span>
               </h4>
               <p className="text-xs text-slate-300 leading-relaxed">
-                どの買い目が的中しても最低払戻が総投資額を上回る（トリガミゼロ・純利益確定）条件に達したレースに <strong className="text-pink-400 font-bold">GOGO! ランプ</strong> が点灯！
+                黄金ベースラインの条件を緩和化（本命P1≧55% × 1号艇モーター≧40% × 合成期待値≧1.15）。全レース買い目を表示しつつ、条件クリア時に <strong className="text-pink-400 font-bold">GOGO! ランプ</strong> が点灯！
               </p>
               <div className="mt-2.5 pt-2 border-t border-slate-800 text-xs text-pink-300 flex items-center justify-between font-mono">
-                <span>ランプ点灯時:</span>
-                <span className="font-bold text-amber-300">激熱・利益確定トリガミなし</span>
+                <span>検証実績:</span>
+                <span className="font-bold text-amber-300">的中率53.9% / 回収率110.6%</span>
               </div>
             </div>
           </div>

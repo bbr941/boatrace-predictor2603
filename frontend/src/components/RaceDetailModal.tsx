@@ -206,11 +206,11 @@ export const RaceDetailModal: React.FC<RaceDetailModalProps> = ({ race, mode, on
               {isGogo ? (
                 <div className="mt-0.5 px-2 py-0.5 rounded-full bg-gradient-to-r from-pink-950 to-purple-950 border border-pink-500 text-pink-300 font-black italic text-[11px] tracking-tight shadow-[0_0_8px_rgba(236,72,153,0.8)] animate-pulse flex items-center gap-1">
                   <span>🎰 GOGO!</span>
-                  <span className="text-[9px] not-italic text-amber-300 font-mono">回収100%超</span>
+                  <span className="text-[9px] not-italic text-amber-300 font-mono">期待回収110%超</span>
                 </div>
               ) : (
-                <div className="text-xs font-mono text-cyan-400 mt-0.5 font-bold">
-                  的中率重視
+                <div className="text-xs font-mono text-slate-400 mt-0.5 font-medium">
+                  的中率重視 (通常)
                 </div>
               )}
             </div>

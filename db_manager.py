@@ -333,6 +333,9 @@ def init_database() -> bool:
                 profit INT DEFAULT 0,
                 is_resolved BOOLEAN DEFAULT FALSE,
                 hit_status VARCHAR(20),
+                is_gogo_lamp BOOLEAN DEFAULT FALSE,
+                expected_roi FLOAT DEFAULT 0.0,
+                motor_rate FLOAT DEFAULT 0.0,
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             );
             """)
@@ -549,6 +552,9 @@ def init_database() -> bool:
                 profit INTEGER DEFAULT 0,
                 is_resolved INTEGER DEFAULT 0,
                 hit_status TEXT,
+                is_gogo_lamp INTEGER DEFAULT 0,
+                expected_roi REAL DEFAULT 0.0,
+                motor_rate REAL DEFAULT 0.0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """)
@@ -759,7 +765,10 @@ def save_hit_focused_prediction(
     bets: Dict[str, int],
     benter_probs: Dict[str, float],
     all_odds: Dict[str, float],
-    target_cum_prob: float = 0.50
+    target_cum_prob: float = 0.50,
+    is_gogo_lamp: bool = False,
+    expected_roi: float = 0.0,
+    motor_rate: float = 0.0
 ) -> bool:
     """
     的中特化（動的ダッチング）の推論結果および買い目を保存 (UPSERT)
@@ -781,8 +790,9 @@ def save_hit_focused_prediction(
                 race_id, race_date, venue_code, venue_name, race_no,
                 deadline_time, top_boat, max_p1, prob_gap, cluster_id,
                 cluster_name, status, total_bet, bets_count, min_return,
-                max_return, min_profit, target_cum_prob
-            ) VALUES ({', '.join([ph]*18)})
+                max_return, min_profit, target_cum_prob, is_gogo_lamp,
+                expected_roi, motor_rate
+            ) VALUES ({', '.join([ph]*21)})
             ON CONFLICT (race_id) DO UPDATE SET
                 deadline_time = EXCLUDED.deadline_time,
                 top_boat = EXCLUDED.top_boat,
@@ -797,6 +807,9 @@ def save_hit_focused_prediction(
                 max_return = EXCLUDED.max_return,
                 min_profit = EXCLUDED.min_profit,
                 target_cum_prob = EXCLUDED.target_cum_prob,
+                is_gogo_lamp = EXCLUDED.is_gogo_lamp,
+                expected_roi = EXCLUDED.expected_roi,
+                motor_rate = EXCLUDED.motor_rate,
                 created_at = CURRENT_TIMESTAMP;
             """
         else:
@@ -805,8 +818,9 @@ def save_hit_focused_prediction(
                 race_id, race_date, venue_code, venue_name, race_no,
                 deadline_time, top_boat, max_p1, prob_gap, cluster_id,
                 cluster_name, status, total_bet, bets_count, min_return,
-                max_return, min_profit, target_cum_prob
-            ) VALUES ({', '.join([ph]*18)})
+                max_return, min_profit, target_cum_prob, is_gogo_lamp,
+                expected_roi, motor_rate
+            ) VALUES ({', '.join([ph]*21)})
             ON CONFLICT(race_id) DO UPDATE SET
                 deadline_time = excluded.deadline_time,
                 top_boat = excluded.top_boat,
@@ -821,13 +835,17 @@ def save_hit_focused_prediction(
                 max_return = excluded.max_return,
                 min_profit = excluded.min_profit,
                 target_cum_prob = excluded.target_cum_prob,
+                is_gogo_lamp = excluded.is_gogo_lamp,
+                expected_roi = excluded.expected_roi,
+                motor_rate = excluded.motor_rate,
                 created_at = CURRENT_TIMESTAMP;
             """
         params = (
             race_id, race_date, venue_code, venue_name, race_no,
             deadline_time, top_boat, max_p1, prob_gap, cluster_id,
             cluster_name, status, total_bet, len(bets) if bets else 0,
-            min_ret, max_ret, min_prof, target_cum_prob
+            min_ret, max_ret, min_prof, target_cum_prob,
+            is_gogo_lamp, expected_roi, motor_rate
         )
         cur.execute(query, params)
 

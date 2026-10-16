@@ -87,7 +87,7 @@ export const RaceButton: React.FC<RaceButtonProps> = ({ race, isSelected, onClic
               <span>🎯 {betsCount}点 ({totalBet.toLocaleString()}円)</span>
             </div>
             <div className="text-[11px] text-amber-300 font-mono font-black drop-shadow-[0_0_4px_rgba(245,158,11,0.8)]">
-              回収100%超 (+{minProfit.toLocaleString()}円〜)
+              ★期待回収110%超 (激熱)
             </div>
           </div>
         );

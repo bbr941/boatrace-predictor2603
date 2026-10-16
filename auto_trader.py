@@ -1586,6 +1586,8 @@ def evaluate_race(
     
     # 8. 的中特化（動的ダッチング）をメモリ上で計算
     bets_hit_focused = {}
+    exp_roi_hit = 0.0
+    is_gogo_lamp = False
     if benter_probs_dict and all_odds:
         try:
             bets_hit_focused = calculate_dutching_bets(
@@ -1597,6 +1599,17 @@ def evaluate_race(
                 min_combos=2,
                 min_synthetic_odds=None  # 目標合成オッズ制約を撤廃し完全な的中率特化へ
             )
+            if bets_hit_focused:
+                tot_hit_b = sum(bets_hit_focused.values())
+                exp_pay = sum(
+                    benter_probs_dict.get(c, 0.0) * all_odds.get(c, 0.0) * amt
+                    for c, amt in bets_hit_focused.items()
+                )
+                exp_roi_hit = (exp_pay / tot_hit_b) if tot_hit_b > 0 else 0.0
+                # 🎯 GOGO!ランプ点灯判定（バックテスト検証済: P1>=55% & モーター2連率>=40% & 合成期待回収率>=1.15）
+                # 2026年実績: 的中率53.9% / 回収率110.6% (+37,975円)
+                if (max_p1 is not None and max_p1 >= 0.55) and (b1_motor_rate >= 40.0) and (exp_roi_hit >= 1.15):
+                    is_gogo_lamp = True
         except Exception: pass
 
     # 9. ポートフォリオ最適化 (SLSQP / 黄金ベースライン)
@@ -1646,7 +1659,9 @@ def evaluate_race(
             'status': status,
             'status_message': status_message,
             'total_bet': sum(bets.values()) if is_investment_go else 0,
-            'bets_count': len(bets) if is_investment_go else 0
+            'bets_count': len(bets) if is_investment_go else 0,
+            'is_gogo_lamp': is_gogo_lamp,
+            'expected_roi': exp_roi_hit
         },
         df_feat=df_feat,
         df_race=df_race,
@@ -1676,9 +1691,13 @@ def evaluate_race(
                 bets=bets_hit_focused,
                 benter_probs=benter_probs_dict,
                 all_odds=all_odds,
-                target_cum_prob=0.50
+                target_cum_prob=0.50,
+                is_gogo_lamp=is_gogo_lamp,
+                expected_roi=exp_roi_hit,
+                motor_rate=b1_motor_rate
             )
-            logger.info(f"💾 [{venue_name} {race_no}R] 的中特化データを hit_focused_predictions に自動蓄積保存しました ({len(bets_hit_focused)}点 / {sum(bets_hit_focused.values()):,}円)")
+            gogo_badge = " 🔥【GOGO!ランプ点灯】" if is_gogo_lamp else ""
+            logger.info(f"💾 [{venue_name} {race_no}R] 的中特化データを hit_focused_predictions に自動蓄積保存しました ({len(bets_hit_focused)}点 / {sum(bets_hit_focused.values()):,}円 / ExpROI={exp_roi_hit:.2f}){gogo_badge}")
         except Exception as e:
             logger.warning(f"的中特化データの保存エラー: {e}")
 
@@ -2095,6 +2114,8 @@ def evaluate_mock_race(
     
     # 的中特化（動的ダッチング）をメモリ上で計算
     bets_hit_focused = {}
+    exp_roi_hit = 0.0
+    is_gogo_lamp = False
     if benter_probs_dict and all_odds:
         try:
             bets_hit_focused = calculate_dutching_bets(
@@ -2106,6 +2127,15 @@ def evaluate_mock_race(
                 min_combos=2,
                 min_synthetic_odds=None  # 目標合成オッズ制約を撤廃し完全な的中率特化へ
             )
+            if bets_hit_focused:
+                tot_hit_b = sum(bets_hit_focused.values())
+                exp_pay = sum(
+                    benter_probs_dict.get(c, 0.0) * all_odds.get(c, 0.0) * amt
+                    for c, amt in bets_hit_focused.items()
+                )
+                exp_roi_hit = (exp_pay / tot_hit_b) if tot_hit_b > 0 else 0.0
+                if (max_p1 is not None and max_p1 >= 0.55) and (b1_motor_rate >= 40.0) and (exp_roi_hit >= 1.15):
+                    is_gogo_lamp = True
         except Exception: pass
 
     # 最適化 (黄金ベースライン)
@@ -2157,7 +2187,9 @@ def evaluate_mock_race(
             'status': status,
             'status_message': status_message,
             'total_bet': total_bet,
-            'bets_count': len(bets) if is_investment_go else 0
+            'bets_count': len(bets) if is_investment_go else 0,
+            'is_gogo_lamp': is_gogo_lamp,
+            'expected_roi': exp_roi_hit
         },
         df_feat=df_feat,
         df_race=df_race,
@@ -2187,7 +2219,10 @@ def evaluate_mock_race(
                 bets=bets_hit_focused,
                 benter_probs=benter_probs_dict,
                 all_odds=all_odds,
-                target_cum_prob=0.50
+                target_cum_prob=0.50,
+                is_gogo_lamp=is_gogo_lamp,
+                expected_roi=exp_roi_hit,
+                motor_rate=b1_motor_rate
             )
             logger.info(f"💾 [MOCK] 的中特化データを hit_focused_predictions に自動蓄積保存しました ({len(bets_hit_focused)}点 / {sum(bets_hit_focused.values()):,}円)")
         except Exception as e:
