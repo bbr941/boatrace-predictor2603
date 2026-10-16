@@ -108,3 +108,22 @@ export interface DashboardStats {
   netProfit: number;
   recoveryRate: number;
 }
+
+/**
+ * 的中特化において回収率が100%を超える条件に達しているか判定 (GOGOランプ点灯判定)
+ * - レース前: 最低払戻額が投資額を上回る（min_return > total_bet または min_profit > 0）、つまりトリガミなしで回収率100%超が確定している激熱状態
+ * - レース後: 的中し回収率100%超を達成（profit > 0 または payout >= total_bet）
+ */
+export function isGogoLampActive(race: HitFocusedPrediction | RacePrediction): boolean {
+  if (race.is_resolved) {
+    return race.hit_status === 'hit' && (race.profit > 0 || (race.payout > 0 && race.payout >= (race.total_bet || 1000)));
+  }
+  const minReturn = (race as HitFocusedPrediction).min_return || 0;
+  const totalBet = race.total_bet || 0;
+  const minProfit = (race as HitFocusedPrediction).min_profit ?? 0;
+  
+  if (totalBet > 0 && minReturn > totalBet) return true;
+  if (minProfit > 0) return true;
+  return false;
+}
+

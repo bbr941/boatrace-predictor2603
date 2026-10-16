@@ -113,7 +113,7 @@ export const App: React.FC = () => {
       {/* 2. Main Content */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 py-4 space-y-4 sm:space-y-6">
         {/* Strategy Guide Banner (Accordion) */}
-        <StrategyGuide />
+        <StrategyGuide mode={mode} />
 
         {/* Dashboard Summary Stats */}
         <SummaryStats stats={stats} />

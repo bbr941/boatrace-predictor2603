@@ -63,7 +63,7 @@ export const Header: React.FC<HeaderProps> = ({
             }`}
           >
             <Target className="w-3.5 h-3.5" />
-            <span>🎯 的中特化 (動的ダッチング)</span>
+            <span>🎯 的中率特化 (GOGOランプ)</span>
           </button>
 
           <button

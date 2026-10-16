@@ -55,6 +55,10 @@ from probability_calibration import (
 )
 from portfolio_optimizer import PortfolioOptimizer
 import db_manager
+try:
+    from update_static_masters import update_all_masters
+except Exception:
+    update_all_masters = None
 
 # ロギング設定
 logging.basicConfig(
@@ -1122,12 +1126,12 @@ def calculate_dutching_bets(
     target_cum_prob: float = 0.50,
     max_combos: int = 8,
     min_combos: int = 2,
-    min_synthetic_odds: float = 2.5
+    min_synthetic_odds: Optional[float] = None
 ) -> Dict[str, int]:
     """
     的中特化: 累積確率50%（最大8点）を勝率順に抽出し、
-    合成オッズ >= min_synthetic_odds (デフォルト2.5倍) の制約下で
-    オッズ逆数比によるダッチング資金配分とトリガミ回避ループを実行
+    合成オッズ制約（min_synthetic_odds）を排して完全な的中率特化で買い目を選定。
+    オッズ逆数比による動的ダッチング資金配分とトリガミ回避ループを実行。
     """
     valid_combos = []
     for combo, prob in sorted(benter_probs.items(), key=lambda x: x[1], reverse=True):
@@ -1141,13 +1145,13 @@ def calculate_dutching_bets(
     selected = []
     cum_p = 0.0
     inv_sum = 0.0
-    max_inv_sum = (1.0 / min_synthetic_odds) if min_synthetic_odds > 0 else 0.95
+    max_inv_sum = (1.0 / min_synthetic_odds) if (min_synthetic_odds is not None and min_synthetic_odds > 0) else 0.99
     
     for item in valid_combos:
         c_name, c_prob, c_odds = item
         next_inv_sum = inv_sum + (1.0 / c_odds)
         
-        # 既に1点以上あり、追加すると合成オッズが min_synthetic_odds を下回る場合は追加をストップ
+        # 合成オッズ制約がある場合のみチェック（未指定時は0.99まで許容して的中率を最大化）
         if selected and next_inv_sum > max_inv_sum:
             if len(selected) >= min_combos:
                 break
@@ -1591,7 +1595,7 @@ def evaluate_race(
                 target_cum_prob=0.50,
                 max_combos=8,
                 min_combos=2,
-                min_synthetic_odds=2.5
+                min_synthetic_odds=None  # 目標合成オッズ制約を撤廃し完全な的中率特化へ
             )
         except Exception: pass
 
@@ -2100,7 +2104,7 @@ def evaluate_mock_race(
                 target_cum_prob=0.50,
                 max_combos=8,
                 min_combos=2,
-                min_synthetic_odds=2.5
+                min_synthetic_odds=None  # 目標合成オッズ制約を撤廃し完全な的中率特化へ
             )
         except Exception: pass
 
@@ -2375,6 +2379,18 @@ def run_worker_loop(
         days=10
     ).tag('exhibition_sync')
     
+    # 毎週月曜 03:00 (夜間アイドル時) に選手・コース外部マスタデータを自動更新
+    if update_all_masters is not None:
+        def safe_update_masters():
+            try:
+                logger.info("🔄 [週次バッチ] 選手・コース外部マスタテーブルの自動更新を実行します...")
+                res = update_all_masters()
+                logger.info(f"✅ [週次バッチ] 外部マスタ更新完了: {res}")
+            except Exception as ex:
+                logger.error(f"⚠️ [週次バッチ] 外部マスタ更新例外: {ex}", exc_info=True)
+        schedule.every().monday.at("03:00").do(safe_update_masters).tag('weekly_master_update')
+        logger.info("📅 週次マスタ自動更新ジョブを登録しました: 毎週月曜 03:00 実行")
+
     # 10分ごとに未確定レースの結果を取得・的中判定・収支更新
     schedule.every(10).minutes.do(settle_race_results).tag('settlement')
     
@@ -2408,6 +2424,7 @@ if __name__ == "__main__":
     parser.add_argument('--max_odds', type=float, default=DEFAULT_MAX_ODDS, help="Maximum Odds threshold (default: 30.0)")
     parser.add_argument('--p1_th', type=float, default=DEFAULT_GATEKEEPER_TH, help="Gatekeeper P1 threshold (default: 0.7438)")
     parser.add_argument('--dry-run', action='store_true', help="Run without sending Discord webhook (console output only)")
+    parser.add_argument('--update-masters', action='store_true', help="Update static master tables in app_data/ from boatrace.db immediately")
     
     args = parser.parse_args()
     
@@ -2421,7 +2438,14 @@ if __name__ == "__main__":
     if args.dry_run:
         webhook = ''
         
-    if args.sync:
+    if args.update_masters:
+        if update_all_masters is not None:
+            logger.info("🔄 外部マスタテーブルの手動即時更新を実行します...")
+            res = update_all_masters()
+            print(f"✅ 外部マスタ更新完了: {res}")
+        else:
+            print("❌ update_static_masters モジュールがロードできませんでした。")
+    elif args.sync:
         # 展示タイム同期モード
         logger.info("🔄 直近10日分の展示タイムを Supabase へ同期します...")
         synced = db_manager.sync_recent_exhibitions(days=10)

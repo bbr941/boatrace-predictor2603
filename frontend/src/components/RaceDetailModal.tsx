@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { HitFocusedPrediction, RacePrediction, BetItem, PredictionMode } from '../types';
+import { HitFocusedPrediction, RacePrediction, BetItem, PredictionMode, isGogoLampActive } from '../types';
 import { getRaceBets } from '../services/api';
 import { X, CheckCircle, AlertCircle, Clock, Zap, DollarSign } from 'lucide-react';
 
@@ -81,10 +81,8 @@ export const RaceDetailModal: React.FC<RaceDetailModalProps> = ({ race, mode, on
     ? (typeof race.profit === 'number' ? race.profit : (isResolved ? (isHit ? payout - totalBet : -totalBet) : 0))
     : 0;
 
-  // Calculate synthetic odds: 1 / sum(1 / odds)
-  const syntheticOdds = bets.length > 0
-    ? (1 / bets.reduce((sum, b) => sum + (b.odds > 0 ? 1 / b.odds : 0), 0)).toFixed(2)
-    : '2.50';
+  const isGogo = isGogoLampActive(race);
+  const minReturn = (race as HitFocusedPrediction).min_return || (bets.length > 0 ? Math.min(...bets.map(b => b.expected_return || Math.round(b.bet_amount * b.odds))) : 0);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-150">
@@ -105,6 +103,11 @@ export const RaceDetailModal: React.FC<RaceDetailModalProps> = ({ race, mode, on
                 <span className="text-xs px-2 py-0.5 rounded bg-blue-600/20 text-blue-400 font-mono border border-blue-500/30">
                   {mode === 'hit_focused' ? '的中特化' : '黄金ベースライン'}
                 </span>
+                {isGogo && (
+                  <span className="px-2 py-0.5 rounded text-[10px] font-black italic bg-gradient-to-r from-pink-600 to-purple-600 text-white border border-pink-400 shadow-[0_0_8px_rgba(236,72,153,0.8)] animate-pulse">
+                    🎰 GOGO!
+                  </span>
+                )}
               </div>
               <div className="flex items-center space-x-2 text-xs text-slate-400 mt-0.5">
                 <span className="flex items-center gap-1 font-mono">
@@ -198,16 +201,23 @@ export const RaceDetailModal: React.FC<RaceDetailModalProps> = ({ race, mode, on
                 {totalBet.toLocaleString()}円
               </div>
             </div>
-            <div className="border-x border-slate-800">
-              <div className="text-slate-500 text-[10px]">目標合成オッズ</div>
-              <div className="font-mono font-bold text-amber-300 text-sm mt-0.5">
-                {syntheticOdds}倍
-              </div>
+            <div className="border-x border-slate-800 flex flex-col items-center justify-center">
+              <div className="text-slate-500 text-[10px]">GOGO! 判定</div>
+              {isGogo ? (
+                <div className="mt-0.5 px-2 py-0.5 rounded-full bg-gradient-to-r from-pink-950 to-purple-950 border border-pink-500 text-pink-300 font-black italic text-[11px] tracking-tight shadow-[0_0_8px_rgba(236,72,153,0.8)] animate-pulse flex items-center gap-1">
+                  <span>🎰 GOGO!</span>
+                  <span className="text-[9px] not-italic text-amber-300 font-mono">回収100%超</span>
+                </div>
+              ) : (
+                <div className="text-xs font-mono text-cyan-400 mt-0.5 font-bold">
+                  的中率重視
+                </div>
+              )}
             </div>
             <div>
-              <div className="text-slate-500 text-[10px]">点数</div>
-              <div className="font-mono font-bold text-blue-400 text-sm mt-0.5">
-                {bets.length || race.bets_count || 5} 点
+              <div className="text-slate-500 text-[10px]">最低払戻想定</div>
+              <div className="font-mono font-bold text-emerald-400 text-sm mt-0.5">
+                {minReturn > 0 ? `${minReturn.toLocaleString()}円` : `${bets.length || race.bets_count || 5}点`}
               </div>
             </div>
           </div>

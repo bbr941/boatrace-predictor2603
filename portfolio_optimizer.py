@@ -399,12 +399,12 @@ def calculate_dutching_bets(
     target_cum_prob: float = 0.50,
     max_combos: int = 8,
     min_combos: int = 2,
-    min_synthetic_odds: float = 2.5
+    min_synthetic_odds: Optional[float] = None
 ) -> Dict[str, int]:
     """
     的中特化: 累積確率50%（最大8点）を勝率順に抽出し、
-    合成オッズ >= min_synthetic_odds (デフォルト2.5倍) の制約下で
-    オッズ逆数比によるダッチング資金配分とトリガミ回避ループを実行
+    合成オッズ制約（min_synthetic_odds）を排して完全な的中率特化で買い目を選定。
+    オッズ逆数比による動的ダッチング資金配分とトリガミ回避ループを実行。
     """
     valid_combos = []
     for combo, prob in sorted(benter_probs.items(), key=lambda x: x[1], reverse=True):
@@ -418,13 +418,13 @@ def calculate_dutching_bets(
     selected = []
     cum_p = 0.0
     inv_sum = 0.0
-    max_inv_sum = (1.0 / min_synthetic_odds) if min_synthetic_odds > 0 else 0.95
+    max_inv_sum = (1.0 / min_synthetic_odds) if (min_synthetic_odds is not None and min_synthetic_odds > 0) else 0.99
     
     for item in valid_combos:
         c_name, c_prob, c_odds = item
         next_inv_sum = inv_sum + (1.0 / c_odds)
         
-        # 既に1点以上あり、追加すると合成オッズが min_synthetic_odds を下回る場合は追加をストップ
+        # 合成オッズ制約がある場合のみチェック（未指定時は0.99まで許容して的中率を最大化）
         if selected and next_inv_sum > max_inv_sum:
             if len(selected) >= min_combos:
                 break
