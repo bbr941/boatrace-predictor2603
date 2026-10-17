@@ -24,19 +24,23 @@ export const RaceButton: React.FC<RaceButtonProps> = ({ race, isSelected, onClic
 
   if (isResolved) {
     if (hitStatus === 'hit') {
-      // 💮 的中! (鮮やかな緑色ハイライト)
-      cardStyle = isGogo
-        ? "bg-gradient-to-b from-emerald-950/90 via-slate-900 to-pink-950/40 border-emerald-400/80 text-emerald-200 shadow-lg shadow-emerald-950/50 hover:border-emerald-300 ring-1 ring-pink-500/40"
-        : "bg-gradient-to-b from-emerald-950/80 to-emerald-900/40 border-emerald-500/60 text-emerald-200 shadow-lg shadow-emerald-950/40 hover:border-emerald-400 ring-1 ring-emerald-500/30";
+      const isTrigami = profit < 0;
+      cardStyle = isTrigami
+        ? "bg-gradient-to-b from-amber-950/60 to-slate-900 border-amber-500/50 text-amber-200 shadow-md hover:border-amber-400 ring-1 ring-amber-500/30"
+        : (isGogo
+          ? "bg-gradient-to-b from-emerald-950/90 via-slate-900 to-pink-950/40 border-emerald-400/80 text-emerald-200 shadow-lg shadow-emerald-950/50 hover:border-emerald-300 ring-1 ring-pink-500/40"
+          : "bg-gradient-to-b from-emerald-950/80 to-emerald-900/40 border-emerald-500/60 text-emerald-200 shadow-lg shadow-emerald-950/40 hover:border-emerald-400 ring-1 ring-emerald-500/30");
       
       contentNode = (
         <div className="flex flex-col items-center justify-center py-1">
-          <div className="flex items-center space-x-1 text-xs font-bold text-emerald-300">
-            <span>💮 的中!</span>
-            <span className="font-mono">+{profit.toLocaleString()}円</span>
+          <div className={`flex items-center space-x-1 text-xs font-bold ${isTrigami ? 'text-amber-300' : 'text-emerald-300'}`}>
+            <span>{isTrigami ? '💮 的中(ガミ)' : '💮 的中!'}</span>
+            <span className="font-mono">
+              {profit > 0 ? `+${profit.toLocaleString()}` : profit < 0 ? `-${Math.abs(profit).toLocaleString()}` : '±0'}円
+            </span>
           </div>
           {race.actual_result && (
-            <span className="text-[10px] text-emerald-400/80 font-mono tracking-wider">
+            <span className={`text-[10px] ${isTrigami ? 'text-amber-400/80' : 'text-emerald-400/80'} font-mono tracking-wider`}>
               結果: {race.actual_result}
             </span>
           )}
@@ -159,8 +163,12 @@ export const RaceButton: React.FC<RaceButtonProps> = ({ race, isSelected, onClic
         <div>
           {isResolved ? (
             hitStatus === 'hit' ? (
-              <span className="px-1.5 py-0.2 rounded text-[9px] font-bold text-emerald-300 bg-emerald-900/60 border border-emerald-500/40">
-                的中
+              <span className={`px-1.5 py-0.2 rounded text-[9px] font-bold ${
+                profit < 0
+                  ? 'text-amber-300 bg-amber-900/60 border border-amber-500/40'
+                  : 'text-emerald-300 bg-emerald-900/60 border border-emerald-500/40'
+              }`}>
+                {profit < 0 ? '的中(ガミ)' : '的中'}
               </span>
             ) : hitStatus === 'miss' ? (
               <span className="px-1.5 py-0.2 rounded text-[9px] font-medium text-slate-500 bg-slate-900 border border-slate-800">

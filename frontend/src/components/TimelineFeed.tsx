@@ -205,7 +205,9 @@ export const TimelineFeed: React.FC<TimelineFeedProps> = ({ races, mode, onSelec
           let cardBorder = "border-slate-800/90 hover:border-slate-700 bg-slate-900/70";
           if (isResolved) {
             if (isHit) {
-              cardBorder = "border-emerald-500/60 bg-gradient-to-br from-emerald-950/40 via-slate-900/90 to-slate-950 shadow-lg shadow-emerald-950/20";
+              cardBorder = profit < 0
+                ? "border-amber-500/50 bg-gradient-to-br from-amber-950/30 via-slate-900/90 to-slate-950 shadow-md shadow-amber-950/20"
+                : "border-emerald-500/60 bg-gradient-to-br from-emerald-950/40 via-slate-900/90 to-slate-950 shadow-lg shadow-emerald-950/20";
             } else if (isMiss) {
               cardBorder = "border-slate-800/80 bg-slate-950/90";
             }
@@ -256,10 +258,17 @@ export const TimelineFeed: React.FC<TimelineFeedProps> = ({ races, mode, onSelec
 
                   {isResolved ? (
                     isHit ? (
-                      <span className="px-2.5 py-1 rounded-lg text-xs font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 flex items-center gap-1 font-mono">
-                        <CheckCircle className="w-3.5 h-3.5 text-emerald-400" />
-                        <span>💮 的中! +{profit.toLocaleString()}円</span>
-                      </span>
+                      profit < 0 ? (
+                        <span className="px-2.5 py-1 rounded-lg text-xs font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 flex items-center gap-1 font-mono">
+                          <CheckCircle className="w-3.5 h-3.5 text-amber-400" />
+                          <span>💮 的中(ガミ) -{Math.abs(profit).toLocaleString()}円</span>
+                        </span>
+                      ) : (
+                        <span className="px-2.5 py-1 rounded-lg text-xs font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 flex items-center gap-1 font-mono">
+                          <CheckCircle className="w-3.5 h-3.5 text-emerald-400" />
+                          <span>💮 的中! {profit > 0 ? `+${profit.toLocaleString()}` : '±0'}円</span>
+                        </span>
+                      )
                     ) : isMiss ? (
                       <span className="px-2 py-1 rounded-lg text-xs font-medium bg-slate-900 text-slate-400 border border-slate-800 font-mono">
                         💀 収支: -{Math.abs(profit).toLocaleString()}円

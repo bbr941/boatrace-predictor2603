@@ -104,7 +104,9 @@ export const RaceDetailModal: React.FC<RaceDetailModalProps> = ({ race, mode, on
             <div
               className={`p-3.5 rounded-xl border flex items-center justify-between ${
                 isHit
-                  ? 'bg-emerald-950/60 border-emerald-500/50 text-emerald-200'
+                  ? (profit < 0
+                      ? 'bg-amber-950/40 border-amber-500/50 text-amber-200'
+                      : 'bg-emerald-950/60 border-emerald-500/50 text-emerald-200')
                   : isMiss
                   ? 'bg-rose-950/40 border-rose-800/50 text-rose-300'
                   : 'bg-slate-950 border-slate-800 text-slate-400'
@@ -112,9 +114,15 @@ export const RaceDetailModal: React.FC<RaceDetailModalProps> = ({ race, mode, on
             >
               <div className="flex items-center space-x-2.5">
                 {isHit ? (
-                  <div className="p-2 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/40">
-                    <CheckCircle className="w-5 h-5" />
-                  </div>
+                  profit < 0 ? (
+                    <div className="p-2 rounded-full bg-amber-500/20 text-amber-400 border border-amber-500/40">
+                      <CheckCircle className="w-5 h-5" />
+                    </div>
+                  ) : (
+                    <div className="p-2 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/40">
+                      <CheckCircle className="w-5 h-5" />
+                    </div>
+                  )
                 ) : isMiss ? (
                   <div className="p-2 rounded-full bg-rose-900/40 text-rose-400 border border-rose-700/50">
                     <AlertCircle className="w-5 h-5" />
@@ -126,7 +134,7 @@ export const RaceDetailModal: React.FC<RaceDetailModalProps> = ({ race, mode, on
                 )}
                 <div>
                   <div className="text-xs text-slate-400 font-semibold">
-                    {isInvested ? '確定着順' : 'レース結果（見送り）'}
+                    {isInvested ? (isHit && profit < 0 ? '確定着順（トリガミ）' : '確定着順') : 'レース結果（見送り）'}
                   </div>
                   <div className="text-lg font-bold font-mono text-white flex items-center gap-2">
                     {race.actual_result ? (
@@ -145,12 +153,12 @@ export const RaceDetailModal: React.FC<RaceDetailModalProps> = ({ race, mode, on
                     profit > 0
                       ? 'text-emerald-400'
                       : profit < 0
-                      ? 'text-rose-400'
+                      ? (isHit ? 'text-amber-400' : 'text-rose-400')
                       : 'text-slate-400'
                   }`}
                 >
                   {isInvested
-                    ? (profit > 0 ? `+${profit.toLocaleString()}` : `${profit.toLocaleString()}円`)
+                    ? (profit > 0 ? `+${profit.toLocaleString()}円` : profit < 0 ? `-${Math.abs(profit).toLocaleString()}円` : '±0円')
                     : '0円 (見送り)'}
                 </div>
                 {payout > 0 && isInvested && (
