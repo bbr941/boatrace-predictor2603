@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { HitFocusedPrediction, RacePrediction, BetItem, PredictionMode, isGogoLampActive } from '../types';
+import { HitFocusedPrediction, RacePrediction, BetItem, PredictionMode, isGogoLampActive, isChanceLampActive } from '../types';
 import { getRaceBets } from '../services/api';
-import { X, CheckCircle, AlertCircle, Clock, Zap, DollarSign } from 'lucide-react';
+import { X, CheckCircle, AlertCircle, Clock, Zap, DollarSign, Star } from 'lucide-react';
 
 interface RaceDetailModalProps {
   race: HitFocusedPrediction | RacePrediction | null;
@@ -51,6 +51,7 @@ export const RaceDetailModal: React.FC<RaceDetailModalProps> = ({ race, mode, on
     : 0;
 
   const isGogo = isGogoLampActive(race);
+  const isChance = isChanceLampActive(race);
   const minReturn = (race as HitFocusedPrediction).min_return || (bets.length > 0 ? Math.min(...bets.map(b => b.expected_return || Math.round(b.bet_amount * b.odds))) : 0);
 
   return (
@@ -72,11 +73,16 @@ export const RaceDetailModal: React.FC<RaceDetailModalProps> = ({ race, mode, on
                 <span className="text-xs px-2 py-0.5 rounded bg-blue-600/20 text-blue-400 font-mono border border-blue-500/30">
                   {mode === 'hit_focused' ? '的中特化' : '黄金ベースライン'}
                 </span>
-                {isGogo && (
+                {isGogo ? (
                   <span className="px-2 py-0.5 rounded text-[10px] font-black italic bg-gradient-to-r from-pink-600 to-purple-600 text-white border border-pink-400 shadow-[0_0_8px_rgba(236,72,153,0.8)] animate-pulse">
-                    🎰 GOGO!
+                    🎰 GOGO! (110%)
                   </span>
-                )}
+                ) : isChance ? (
+                  <span className="px-2 py-0.5 rounded text-[10px] font-black italic bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 border border-amber-300 shadow-[0_0_8px_rgba(245,158,11,0.7)] animate-pulse flex items-center gap-0.5">
+                    <Star className="w-2.5 h-2.5 fill-slate-950 text-slate-950" />
+                    CHANCE (101%)
+                  </span>
+                ) : null}
               </div>
               <div className="flex items-center space-x-2 text-xs text-slate-400 mt-0.5">
                 <span className="flex items-center gap-1 font-mono">
@@ -179,11 +185,17 @@ export const RaceDetailModal: React.FC<RaceDetailModalProps> = ({ race, mode, on
               </div>
             </div>
             <div className="border-x border-slate-800 flex flex-col items-center justify-center">
-              <div className="text-slate-500 text-[10px]">GOGO! 判定</div>
+              <div className="text-slate-500 text-[10px]">ランプ判定</div>
               {isGogo ? (
                 <div className="mt-0.5 px-2 py-0.5 rounded-full bg-gradient-to-r from-pink-950 to-purple-950 border border-pink-500 text-pink-300 font-black italic text-[11px] tracking-tight shadow-[0_0_8px_rgba(236,72,153,0.8)] animate-pulse flex items-center gap-1">
                   <span>🎰 GOGO!</span>
                   <span className="text-[9px] not-italic text-amber-300 font-mono">期待回収110%超</span>
+                </div>
+              ) : isChance ? (
+                <div className="mt-0.5 px-2 py-0.5 rounded-full bg-gradient-to-r from-amber-950 to-orange-950 border border-amber-400 text-amber-300 font-black italic text-[11px] tracking-tight shadow-[0_0_8px_rgba(245,158,11,0.7)] animate-pulse flex items-center gap-1">
+                  <Star className="w-2.5 h-2.5 fill-amber-300 text-amber-300" />
+                  <span>CHANCE</span>
+                  <span className="text-[9px] not-italic text-amber-200 font-mono">期待回収101%超</span>
                 </div>
               ) : (
                 <div className="text-xs font-mono text-slate-400 mt-0.5 font-medium">

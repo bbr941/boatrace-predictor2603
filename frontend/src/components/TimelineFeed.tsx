@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { HitFocusedPrediction, RacePrediction, BetItem, PredictionMode, isGogoLampActive } from '../types';
+import { HitFocusedPrediction, RacePrediction, BetItem, PredictionMode, isGogoLampActive, isChanceLampActive } from '../types';
 import { getBatchRaceBets } from '../services/api';
 import { CombinationDisplay } from './CombinationDisplay';
-import { Clock, Flame, CheckCircle, AlertCircle, Sparkles, Filter, ArrowUpDown, ChevronRight, Loader2 } from 'lucide-react';
+import { Clock, Flame, CheckCircle, AlertCircle, Sparkles, Filter, ArrowUpDown, ChevronRight, Loader2, Star } from 'lucide-react';
 
 interface TimelineFeedProps {
   races: (HitFocusedPrediction | RacePrediction)[];
@@ -11,7 +11,7 @@ interface TimelineFeedProps {
 }
 
 type SortType = 'latest' | 'upcoming';
-type FilterType = 'all' | 'gogo' | 'invested' | 'unresolved' | 'hit';
+type FilterType = 'all' | 'gogo' | 'chance' | 'invested' | 'unresolved' | 'hit';
 
 export const TimelineFeed: React.FC<TimelineFeedProps> = ({ races, mode, onSelectRace }) => {
   const [betsMap, setBetsMap] = useState<Record<string, BetItem[]>>({});
@@ -86,6 +86,8 @@ export const TimelineFeed: React.FC<TimelineFeedProps> = ({ races, mode, onSelec
     // Filter
     if (filterType === 'gogo') {
       list = list.filter((r) => isGogoLampActive(r));
+    } else if (filterType === 'chance') {
+      list = list.filter((r) => isGogoLampActive(r) || isChanceLampActive(r));
     } else if (filterType === 'invested') {
       list = list.filter((r) => r.status.includes('go') || r.hit_status === 'hit' || r.hit_status === 'miss');
     } else if (filterType === 'unresolved') {
@@ -148,7 +150,8 @@ export const TimelineFeed: React.FC<TimelineFeedProps> = ({ races, mode, onSelec
           </div>
           {[
             { id: 'all', label: 'すべて' },
-            { id: 'gogo', label: '🎰 GOGO!ランプのみ', activeClass: 'bg-pink-600 text-white font-bold' },
+            { id: 'gogo', label: '🎰 GOGO! (回収110%)', activeClass: 'bg-pink-600 text-white font-bold shadow-sm' },
+            { id: 'chance', label: '⭐ CHANCE以上 (回収100%超)', activeClass: 'bg-amber-500 text-slate-950 font-black shadow-sm' },
             { id: 'invested', label: '🎯 参戦レース' },
             { id: 'unresolved', label: '⏳ 未確定' },
             { id: 'hit', label: '💮 的中のみ' },
@@ -190,6 +193,7 @@ export const TimelineFeed: React.FC<TimelineFeedProps> = ({ races, mode, onSelec
       <div className="space-y-3.5">
         {processedRaces.map((race) => {
           const isGogo = isGogoLampActive(race);
+          const isChance = isChanceLampActive(race);
           const isResolved = race.is_resolved;
           const hitStatus = race.hit_status;
           const isHit = hitStatus === 'hit';
@@ -200,6 +204,10 @@ export const TimelineFeed: React.FC<TimelineFeedProps> = ({ races, mode, onSelec
           const p1 = race.max_p1 ? (race.max_p1 * 100).toFixed(1) : null;
           const motor = (race as HitFocusedPrediction).motor_rate;
           const expRoi = (race as HitFocusedPrediction).expected_roi;
+          const synOdds = (race as HitFocusedPrediction).synthetic_odds ||
+            (totalBet > 0 && (race as HitFocusedPrediction).min_return 
+              ? (race as HitFocusedPrediction).min_return / totalBet 
+              : 0);
 
           // Card Border / Glow
           let cardBorder = "border-slate-800/90 hover:border-slate-700 bg-slate-900/70";
@@ -212,7 +220,9 @@ export const TimelineFeed: React.FC<TimelineFeedProps> = ({ races, mode, onSelec
               cardBorder = "border-slate-800/80 bg-slate-950/90";
             }
           } else if (isGogo) {
-            cardBorder = "border-pink-500/60 bg-gradient-to-br from-purple-950/30 via-slate-900/90 to-pink-950/20 shadow-xl shadow-pink-950/30 ring-1 ring-pink-500/40";
+            cardBorder = "border-pink-500/70 bg-gradient-to-br from-purple-950/30 via-slate-900/90 to-pink-950/20 shadow-xl shadow-pink-950/35 ring-1 ring-pink-500/50";
+          } else if (isChance) {
+            cardBorder = "border-amber-400/70 bg-gradient-to-br from-amber-950/30 via-slate-900/90 to-yellow-950/20 shadow-lg shadow-amber-950/30 ring-1 ring-amber-400/50";
           } else if (race.status.includes('go')) {
             cardBorder = "border-blue-500/50 bg-gradient-to-br from-blue-950/30 via-slate-900/90 to-slate-950";
           }
@@ -245,16 +255,24 @@ export const TimelineFeed: React.FC<TimelineFeedProps> = ({ races, mode, onSelec
                   </span>
                 </div>
 
-                {/* Right: GOGO Badge / Hit Result Badge */}
+                {/* Right: GOGO / CHANCE Badge / Hit Result Badge */}
                 <div className="flex items-center space-x-2">
-                  {isGogo && (
+                  {isGogo ? (
                     <span className="px-2.5 py-1 rounded-full text-[11px] font-black italic bg-gradient-to-r from-pink-600 to-purple-600 text-white border border-pink-400/60 shadow-[0_0_10px_rgba(236,72,153,0.7)] animate-pulse flex items-center gap-1">
                       <span>🎰 GOGO!</span>
                       <span className="not-italic text-[10px] text-amber-200 font-bold hidden sm:inline">
-                        期待回収110%超
+                        超激アツ (回収110%)
                       </span>
                     </span>
-                  )}
+                  ) : isChance ? (
+                    <span className="px-2.5 py-1 rounded-full text-[11px] font-black italic bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 border border-amber-300 shadow-[0_0_10px_rgba(245,158,11,0.6)] animate-pulse flex items-center gap-1">
+                      <Star className="w-3 h-3 fill-slate-950 text-slate-950" />
+                      <span>CHANCE</span>
+                      <span className="not-italic text-[10px] text-slate-950 font-bold hidden sm:inline">
+                        好機 (回収101%)
+                      </span>
+                    </span>
+                  ) : null}
 
                   {isResolved ? (
                     isHit ? (
@@ -314,7 +332,12 @@ export const TimelineFeed: React.FC<TimelineFeedProps> = ({ races, mode, onSelec
                   )}
                   {expRoi !== undefined && expRoi !== null && expRoi > 0 && (
                     <span>
-                      合成期待回収: <strong className={expRoi >= 1.15 ? 'text-amber-300' : 'text-slate-200'}>{(expRoi * 100).toFixed(0)}%</strong>
+                      合成期待回収: <strong className={expRoi >= 1.15 ? 'text-pink-300' : expRoi >= 1.05 ? 'text-amber-300' : 'text-slate-200'}>{(expRoi * 100).toFixed(0)}%</strong>
+                    </span>
+                  )}
+                  {synOdds !== undefined && synOdds > 0 && (
+                    <span>
+                      合成オッズ: <strong className="text-slate-200">{synOdds.toFixed(1)}倍</strong>
                     </span>
                   )}
                 </div>

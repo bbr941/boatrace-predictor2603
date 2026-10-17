@@ -1,6 +1,6 @@
 import React from 'react';
-import { HitFocusedPrediction, RacePrediction, isGogoLampActive } from '../types';
-import { Clock, Flame } from 'lucide-react';
+import { HitFocusedPrediction, RacePrediction, isGogoLampActive, isChanceLampActive } from '../types';
+import { Clock, Flame, Star } from 'lucide-react';
 
 interface RaceButtonProps {
   race: HitFocusedPrediction | RacePrediction;
@@ -17,6 +17,7 @@ export const RaceButton: React.FC<RaceButtonProps> = ({ race, isSelected, onClic
   const betsCount = race.bets_count || 5;
   const minProfit = (race as HitFocusedPrediction).min_profit || 0;
   const isGogo = isGogoLampActive(race);
+  const isChance = isChanceLampActive(race);
 
   // Visual Styles based on status
   let cardStyle = "bg-slate-900/40 border-slate-800/80 text-slate-500 hover:border-slate-700";
@@ -29,6 +30,8 @@ export const RaceButton: React.FC<RaceButtonProps> = ({ race, isSelected, onClic
         ? "bg-gradient-to-b from-amber-950/60 to-slate-900 border-amber-500/50 text-amber-200 shadow-md hover:border-amber-400 ring-1 ring-amber-500/30"
         : (isGogo
           ? "bg-gradient-to-b from-emerald-950/90 via-slate-900 to-pink-950/40 border-emerald-400/80 text-emerald-200 shadow-lg shadow-emerald-950/50 hover:border-emerald-300 ring-1 ring-pink-500/40"
+          : isChance
+          ? "bg-gradient-to-b from-emerald-950/90 via-slate-900 to-amber-950/40 border-emerald-400/80 text-emerald-200 shadow-lg shadow-emerald-950/50 hover:border-emerald-300 ring-1 ring-amber-400/40"
           : "bg-gradient-to-b from-emerald-950/80 to-emerald-900/40 border-emerald-500/60 text-emerald-200 shadow-lg shadow-emerald-950/40 hover:border-emerald-400 ring-1 ring-emerald-500/30");
       
       contentNode = (
@@ -83,7 +86,7 @@ export const RaceButton: React.FC<RaceButtonProps> = ({ race, isSelected, onClic
     // レース前
     if (isGo) {
       if (isGogo) {
-        // 🎰 GOGOランプ点灯 (回収率100%超確定)
+        // 🎰 GOGOランプ点灯 (Tier 1: 回収率110%超)
         cardStyle = "bg-gradient-to-b from-purple-950/80 via-slate-900 to-pink-950/50 border-pink-500/70 text-pink-100 hover:border-pink-400 shadow-xl shadow-pink-950/40 hover:scale-[1.02] ring-1 ring-pink-500/50";
         contentNode = (
           <div className="flex flex-col items-center justify-center py-1">
@@ -92,6 +95,19 @@ export const RaceButton: React.FC<RaceButtonProps> = ({ race, isSelected, onClic
             </div>
             <div className="text-[11px] text-amber-300 font-mono font-black drop-shadow-[0_0_4px_rgba(245,158,11,0.8)]">
               ★期待回収110%超 (激熱)
+            </div>
+          </div>
+        );
+      } else if (isChance) {
+        // ⭐ CHANCEランプ点灯 (Tier 2: 回収率101%超)
+        cardStyle = "bg-gradient-to-b from-amber-950/70 via-slate-900 to-yellow-950/40 border-amber-400/70 text-amber-100 hover:border-amber-300 shadow-lg shadow-amber-950/30 hover:scale-[1.02] ring-1 ring-amber-400/50";
+        contentNode = (
+          <div className="flex flex-col items-center justify-center py-1">
+            <div className="flex items-center space-x-1 text-[11px] sm:text-xs font-semibold text-amber-200">
+              <span>🎯 {betsCount}点 ({totalBet.toLocaleString()}円)</span>
+            </div>
+            <div className="text-[11px] text-amber-300 font-mono font-black drop-shadow-[0_0_4px_rgba(245,158,11,0.8)]">
+              ★期待回収101%超 (好機)
             </div>
           </div>
         );
@@ -129,19 +145,23 @@ export const RaceButton: React.FC<RaceButtonProps> = ({ race, isSelected, onClic
         isSelected ? 'ring-2 ring-cyan-400 ring-offset-2 ring-offset-slate-950' : ''
       }`}
     >
-      {/* Card Header: Race No & Deadline & GOGO Lamp */}
+      {/* Card Header: Race No & Deadline & Lamp Badge */}
       <div className="flex items-center justify-between w-full border-b border-white/5 pb-1">
         <div className="flex items-center space-x-1.5">
           <span className="font-bold font-mono text-xs text-slate-200">
             {race.race_no}R
           </span>
 
-          {/* GOGO! Lamp in Header */}
-          {isGogo && (
+          {/* Lamp in Header */}
+          {isGogo ? (
             <span className="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded bg-gradient-to-r from-purple-900 to-pink-900 border border-pink-400 text-pink-200 shadow-[0_0_8px_rgba(236,72,153,0.8)] animate-pulse font-black italic text-[9px] tracking-tight">
               GOGO!
             </span>
-          )}
+          ) : isChance ? (
+            <span className="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded bg-gradient-to-r from-amber-900 to-orange-900 border border-amber-300 text-amber-200 shadow-[0_0_8px_rgba(245,158,11,0.7)] animate-pulse font-black italic text-[9px] tracking-tight">
+              CHANCE
+            </span>
+          ) : null}
         </div>
 
         <div className="flex items-center space-x-1 text-[10px] font-mono">

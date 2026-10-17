@@ -92,12 +92,12 @@ export const StrategyGuide: React.FC<StrategyGuideProps> = ({ mode = 'hit_focuse
               <span className="font-bold text-sm sm:text-base text-slate-100 flex items-center gap-1.5">
                 【完全的中率特化】AIダイレクトダッチング
               </span>
-              <span className="px-2 py-0.5 rounded-full text-[10px] font-black italic bg-gradient-to-r from-pink-600 to-purple-600 text-white border border-pink-400/50 shadow-[0_0_8px_rgba(236,72,153,0.6)] animate-pulse">
-                🎰 GOGO! ランプ搭載
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-black italic bg-gradient-to-r from-pink-600 via-purple-600 to-amber-500 text-white border border-pink-400/50 shadow-[0_0_8px_rgba(236,72,153,0.6)] animate-pulse">
+                🎰 GOGO! & ⭐ CHANCE 2段階ランプ搭載
               </span>
             </div>
             <p className="text-xs text-slate-400">
-              コロガシ・合成オッズ制約を完全撤廃 ➔ AI累積確率重視で的中率を極限追求
+              全レース買い目を常時表示しつつ、回収率100%超確定の2段階シグナルを自動点灯
             </p>
           </div>
         </div>
@@ -139,7 +139,7 @@ export const StrategyGuide: React.FC<StrategyGuideProps> = ({ mode = 'hit_focuse
                 <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-cyan-600/20 text-cyan-400 border border-cyan-500/30 flex items-center gap-1">
                   <Sparkles className="w-3 h-3" /> 動的ダッチング
                 </span>
-                <span className="text-xs font-mono text-cyan-300">トリガミ回避傾斜</span>
+                <span className="text-xs font-mono text-cyan-300">均等払戻傾斜</span>
               </div>
               <h4 className="text-sm font-semibold text-white mb-1">
                 オッズ逆数比の均等払戻
@@ -153,23 +153,30 @@ export const StrategyGuide: React.FC<StrategyGuideProps> = ({ mode = 'hit_focuse
               </div>
             </div>
 
-            {/* Pillar 3: GOGO Lamp */}
-            <div className="bg-gradient-to-b from-pink-950/40 to-slate-900/90 border border-pink-500/40 rounded-lg p-3 relative shadow-[0_0_15px_rgba(236,72,153,0.15)]">
+            {/* Pillar 3: 2-Tier Lamps */}
+            <div className="bg-gradient-to-b from-purple-950/40 via-slate-900/90 to-amber-950/30 border border-pink-500/40 rounded-lg p-3 relative shadow-[0_0_15px_rgba(236,72,153,0.15)]">
               <div className="flex items-center justify-between mb-1.5">
                 <span className="text-[11px] font-black px-2 py-0.5 rounded bg-pink-600/30 text-pink-300 border border-pink-400/50 flex items-center gap-1 animate-pulse">
-                  <Flame className="w-3 h-3 text-pink-400" /> GOGO! ランプ
+                  <Flame className="w-3 h-3 text-pink-400" /> 2段階ランプ
                 </span>
-                <span className="text-xs font-mono text-amber-300 font-bold">回収率110.6%</span>
+                <span className="text-xs font-mono text-amber-300 font-bold">回収100%超検証済</span>
               </div>
-              <h4 className="text-sm font-semibold text-white mb-1 flex items-center gap-1.5">
-                <span>🎰 黄金緩和条件達成で点灯</span>
+              <h4 className="text-sm font-semibold text-white mb-1">
+                🎰 GOGO! & ⭐ CHANCE
               </h4>
-              <p className="text-xs text-slate-300 leading-relaxed">
-                黄金ベースラインの条件を緩和化（本命P1≧55% × 1号艇モーター≧40% × 合成期待値≧1.15）。全レース買い目を表示しつつ、条件クリア時に <strong className="text-pink-400 font-bold">GOGO! ランプ</strong> が点灯！
-              </p>
+              <div className="text-[11px] text-slate-300 space-y-1.5 leading-relaxed">
+                <div>
+                  <strong className="text-pink-400">🎰 GOGO! (超激アツ)</strong>: P1≧55% × モーター≧40% × 期待値≧1.15
+                  <div className="text-amber-300 font-mono text-[10px]">実績: 的中率53.9% / 回収率110.6%</div>
+                </div>
+                <div>
+                  <strong className="text-amber-400">⭐ CHANCE (好機)</strong>: P1≧55% × モーター≧36% × 合成≧2.0倍 × 期待値≧1.05
+                  <div className="text-amber-300 font-mono text-[10px]">実績: 的中率39.6% / 回収率101.3% (総合101.9%)</div>
+                </div>
+              </div>
               <div className="mt-2.5 pt-2 border-t border-slate-800 text-xs text-pink-300 flex items-center justify-between font-mono">
-                <span>検証実績:</span>
-                <span className="font-bold text-amber-300">的中率53.9% / 回収率110.6%</span>
+                <span>シグナル:</span>
+                <span className="font-bold text-amber-300">どちらも回収率100%超</span>
               </div>
             </div>
           </div>
@@ -183,11 +190,11 @@ export const StrategyGuide: React.FC<StrategyGuideProps> = ({ mode = 'hit_focuse
             </div>
             <div className="flex items-center gap-1 bg-slate-900 px-2 py-1 rounded border border-slate-800">
               <CheckCircle2 className="w-3.5 h-3.5 text-blue-400" />
-              <span>目標合成オッズ撤廃（AI勝率優先の超高的中率）</span>
+              <span>全レース買い目表示（クリック不要タイムライン表示対応）</span>
             </div>
             <div className="flex items-center gap-1 bg-slate-900 px-2 py-1 rounded border border-slate-800">
-              <CheckCircle2 className="w-3.5 h-3.5 text-pink-400" />
-              <span>GOGO! ランプ点灯レースは回収率100%超のチャンス！</span>
+              <CheckCircle2 className="w-3.5 h-3.5 text-amber-400" />
+              <span>GOGO! または CHANCE 点灯レースは回収率100%超！</span>
             </div>
           </div>
         </div>

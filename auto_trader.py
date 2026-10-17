@@ -1587,7 +1587,9 @@ def evaluate_race(
     # 8. 的中特化（動的ダッチング）をメモリ上で計算
     bets_hit_focused = {}
     exp_roi_hit = 0.0
+    syn_odds_hit = 0.0
     is_gogo_lamp = False
+    is_chance_lamp = False
     if benter_probs_dict and all_odds:
         try:
             bets_hit_focused = calculate_dutching_bets(
@@ -1606,10 +1608,17 @@ def evaluate_race(
                     for c, amt in bets_hit_focused.items()
                 )
                 exp_roi_hit = (exp_pay / tot_hit_b) if tot_hit_b > 0 else 0.0
-                # 🎯 GOGO!ランプ点灯判定（バックテスト検証済: P1>=55% & モーター2連率>=40% & 合成期待回収率>=1.15）
+                inv_sum = sum(1.0 / all_odds.get(c, 1.0) for c in bets_hit_focused.keys() if all_odds.get(c, 0) > 0)
+                syn_odds_hit = 1.0 / inv_sum if inv_sum > 0 else 0.0
+
+                # 🎰 GOGO!ランプ点灯判定 (超激アツ / Tier 1): P1>=55% & モーター2連率>=40% & 合成期待回収率>=1.15
                 # 2026年実績: 的中率53.9% / 回収率110.6% (+37,975円)
                 if (max_p1 is not None and max_p1 >= 0.55) and (b1_motor_rate >= 40.0) and (exp_roi_hit >= 1.15):
                     is_gogo_lamp = True
+                # ⭐ CHANCEランプ点灯判定 (チャンス / Tier 2): P1>=55% & モーター2連率>=36% & 合成オッズ>=2.0 & 期待回収率>=1.05
+                # 2026年実績: 的中率39.6% / 回収率101.3% (GOGO含む全体では回収率101.9%)
+                elif (max_p1 is not None and max_p1 >= 0.55) and (b1_motor_rate >= 36.0) and (syn_odds_hit >= 2.0) and (exp_roi_hit >= 1.05):
+                    is_chance_lamp = True
         except Exception: pass
 
     # 9. ポートフォリオ最適化 (SLSQP / 黄金ベースライン)
@@ -1661,7 +1670,9 @@ def evaluate_race(
             'total_bet': sum(bets.values()) if is_investment_go else 0,
             'bets_count': len(bets) if is_investment_go else 0,
             'is_gogo_lamp': is_gogo_lamp,
-            'expected_roi': exp_roi_hit
+            'is_chance_lamp': is_chance_lamp,
+            'expected_roi': exp_roi_hit,
+            'synthetic_odds': syn_odds_hit
         },
         df_feat=df_feat,
         df_race=df_race,
@@ -1693,11 +1704,17 @@ def evaluate_race(
                 all_odds=all_odds,
                 target_cum_prob=0.50,
                 is_gogo_lamp=is_gogo_lamp,
+                is_chance_lamp=is_chance_lamp,
                 expected_roi=exp_roi_hit,
-                motor_rate=b1_motor_rate
+                motor_rate=b1_motor_rate,
+                synthetic_odds=syn_odds_hit
             )
-            gogo_badge = " 🔥【GOGO!ランプ点灯】" if is_gogo_lamp else ""
-            logger.info(f"💾 [{venue_name} {race_no}R] 的中特化データを hit_focused_predictions に自動蓄積保存しました ({len(bets_hit_focused)}点 / {sum(bets_hit_focused.values()):,}円 / ExpROI={exp_roi_hit:.2f}){gogo_badge}")
+            lamp_badge = ""
+            if is_gogo_lamp:
+                lamp_badge = " 🔥【GOGO!ランプ点灯】(回収率110.6%)"
+            elif is_chance_lamp:
+                lamp_badge = " ⭐【CHANCEランプ点灯】(回収率101.3%)"
+            logger.info(f"💾 [{venue_name} {race_no}R] 的中特化データを hit_focused_predictions に自動蓄積保存しました ({len(bets_hit_focused)}点 / {sum(bets_hit_focused.values()):,}円 / ExpROI={exp_roi_hit:.2f} / 合成={syn_odds_hit:.2f}){lamp_badge}")
         except Exception as e:
             logger.warning(f"的中特化データの保存エラー: {e}")
 
@@ -2115,7 +2132,9 @@ def evaluate_mock_race(
     # 的中特化（動的ダッチング）をメモリ上で計算
     bets_hit_focused = {}
     exp_roi_hit = 0.0
+    syn_odds_hit = 0.0
     is_gogo_lamp = False
+    is_chance_lamp = False
     if benter_probs_dict and all_odds:
         try:
             bets_hit_focused = calculate_dutching_bets(
@@ -2134,8 +2153,15 @@ def evaluate_mock_race(
                     for c, amt in bets_hit_focused.items()
                 )
                 exp_roi_hit = (exp_pay / tot_hit_b) if tot_hit_b > 0 else 0.0
+                inv_sum = sum(1.0 / all_odds.get(c, 1.0) for c in bets_hit_focused.keys() if all_odds.get(c, 0) > 0)
+                syn_odds_hit = 1.0 / inv_sum if inv_sum > 0 else 0.0
+
+                # 🎰 GOGO!ランプ点灯判定 (超激アツ / Tier 1): P1>=55% & モーター2連率>=40% & 合成期待回収率>=1.15
                 if (max_p1 is not None and max_p1 >= 0.55) and (b1_motor_rate >= 40.0) and (exp_roi_hit >= 1.15):
                     is_gogo_lamp = True
+                # ⭐ CHANCEランプ点灯判定 (チャンス / Tier 2): P1>=55% & モーター2連率>=36% & 合成オッズ>=2.0 & 期待回収率>=1.05
+                elif (max_p1 is not None and max_p1 >= 0.55) and (b1_motor_rate >= 36.0) and (syn_odds_hit >= 2.0) and (exp_roi_hit >= 1.05):
+                    is_chance_lamp = True
         except Exception: pass
 
     # 最適化 (黄金ベースライン)
@@ -2189,7 +2215,9 @@ def evaluate_mock_race(
             'total_bet': total_bet,
             'bets_count': len(bets) if is_investment_go else 0,
             'is_gogo_lamp': is_gogo_lamp,
-            'expected_roi': exp_roi_hit
+            'is_chance_lamp': is_chance_lamp,
+            'expected_roi': exp_roi_hit,
+            'synthetic_odds': syn_odds_hit
         },
         df_feat=df_feat,
         df_race=df_race,
@@ -2221,8 +2249,10 @@ def evaluate_mock_race(
                 all_odds=all_odds,
                 target_cum_prob=0.50,
                 is_gogo_lamp=is_gogo_lamp,
+                is_chance_lamp=is_chance_lamp,
                 expected_roi=exp_roi_hit,
-                motor_rate=b1_motor_rate
+                motor_rate=b1_motor_rate,
+                synthetic_odds=syn_odds_hit
             )
             logger.info(f"💾 [MOCK] 的中特化データを hit_focused_predictions に自動蓄積保存しました ({len(bets_hit_focused)}点 / {sum(bets_hit_focused.values()):,}円)")
         except Exception as e:

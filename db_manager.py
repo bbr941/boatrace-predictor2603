@@ -368,7 +368,9 @@ def init_database() -> bool:
                 "ALTER TABLE hit_focused_predictions ADD COLUMN IF NOT EXISTS payout INT DEFAULT 0;",
                 "ALTER TABLE hit_focused_predictions ADD COLUMN IF NOT EXISTS profit INT DEFAULT 0;",
                 "ALTER TABLE hit_focused_predictions ADD COLUMN IF NOT EXISTS is_resolved BOOLEAN DEFAULT FALSE;",
-                "ALTER TABLE hit_focused_predictions ADD COLUMN IF NOT EXISTS hit_status VARCHAR(20);"
+                "ALTER TABLE hit_focused_predictions ADD COLUMN IF NOT EXISTS hit_status VARCHAR(20);",
+                "ALTER TABLE hit_focused_predictions ADD COLUMN IF NOT EXISTS is_chance_lamp BOOLEAN DEFAULT FALSE;",
+                "ALTER TABLE hit_focused_predictions ADD COLUMN IF NOT EXISTS synthetic_odds FLOAT DEFAULT 0.0;"
             ]:
                 try: cur.execute(col_ddl)
                 except Exception: pass
@@ -587,7 +589,9 @@ def init_database() -> bool:
                 "ALTER TABLE hit_focused_predictions ADD COLUMN payout INTEGER DEFAULT 0;",
                 "ALTER TABLE hit_focused_predictions ADD COLUMN profit INTEGER DEFAULT 0;",
                 "ALTER TABLE hit_focused_predictions ADD COLUMN is_resolved INTEGER DEFAULT 0;",
-                "ALTER TABLE hit_focused_predictions ADD COLUMN hit_status TEXT;"
+                "ALTER TABLE hit_focused_predictions ADD COLUMN hit_status TEXT;",
+                "ALTER TABLE hit_focused_predictions ADD COLUMN is_chance_lamp INTEGER DEFAULT 0;",
+                "ALTER TABLE hit_focused_predictions ADD COLUMN synthetic_odds REAL DEFAULT 0.0;"
             ]:
                 try: cur.execute(col_ddl)
                 except Exception: pass
@@ -767,8 +771,10 @@ def save_hit_focused_prediction(
     all_odds: Dict[str, float],
     target_cum_prob: float = 0.50,
     is_gogo_lamp: bool = False,
+    is_chance_lamp: bool = False,
     expected_roi: float = 0.0,
-    motor_rate: float = 0.0
+    motor_rate: float = 0.0,
+    synthetic_odds: float = 0.0
 ) -> bool:
     """
     的中特化（動的ダッチング）の推論結果および買い目を保存 (UPSERT)
@@ -791,8 +797,8 @@ def save_hit_focused_prediction(
                 deadline_time, top_boat, max_p1, prob_gap, cluster_id,
                 cluster_name, status, total_bet, bets_count, min_return,
                 max_return, min_profit, target_cum_prob, is_gogo_lamp,
-                expected_roi, motor_rate
-            ) VALUES ({', '.join([ph]*21)})
+                is_chance_lamp, expected_roi, motor_rate, synthetic_odds
+            ) VALUES ({', '.join([ph]*23)})
             ON CONFLICT (race_id) DO UPDATE SET
                 deadline_time = EXCLUDED.deadline_time,
                 top_boat = EXCLUDED.top_boat,
@@ -808,8 +814,10 @@ def save_hit_focused_prediction(
                 min_profit = EXCLUDED.min_profit,
                 target_cum_prob = EXCLUDED.target_cum_prob,
                 is_gogo_lamp = EXCLUDED.is_gogo_lamp,
+                is_chance_lamp = EXCLUDED.is_chance_lamp,
                 expected_roi = EXCLUDED.expected_roi,
                 motor_rate = EXCLUDED.motor_rate,
+                synthetic_odds = EXCLUDED.synthetic_odds,
                 created_at = CURRENT_TIMESTAMP;
             """
         else:
@@ -819,8 +827,8 @@ def save_hit_focused_prediction(
                 deadline_time, top_boat, max_p1, prob_gap, cluster_id,
                 cluster_name, status, total_bet, bets_count, min_return,
                 max_return, min_profit, target_cum_prob, is_gogo_lamp,
-                expected_roi, motor_rate
-            ) VALUES ({', '.join([ph]*21)})
+                is_chance_lamp, expected_roi, motor_rate, synthetic_odds
+            ) VALUES ({', '.join([ph]*23)})
             ON CONFLICT(race_id) DO UPDATE SET
                 deadline_time = excluded.deadline_time,
                 top_boat = excluded.top_boat,
@@ -836,8 +844,10 @@ def save_hit_focused_prediction(
                 min_profit = excluded.min_profit,
                 target_cum_prob = excluded.target_cum_prob,
                 is_gogo_lamp = excluded.is_gogo_lamp,
+                is_chance_lamp = excluded.is_chance_lamp,
                 expected_roi = excluded.expected_roi,
                 motor_rate = excluded.motor_rate,
+                synthetic_odds = excluded.synthetic_odds,
                 created_at = CURRENT_TIMESTAMP;
             """
         params = (
@@ -845,7 +855,7 @@ def save_hit_focused_prediction(
             deadline_time, top_boat, max_p1, prob_gap, cluster_id,
             cluster_name, status, total_bet, len(bets) if bets else 0,
             min_ret, max_ret, min_prof, target_cum_prob,
-            is_gogo_lamp, expected_roi, motor_rate
+            is_gogo_lamp, is_chance_lamp, expected_roi, motor_rate, synthetic_odds
         )
         cur.execute(query, params)
 
@@ -912,6 +922,7 @@ def get_hit_focused_races(race_date: Optional[str] = None) -> List[Dict[str, Any
         SELECT race_id, race_date, venue_code, venue_name, race_no, deadline_time,
                top_boat, max_p1, prob_gap, cluster_id, cluster_name, status,
                total_bet, bets_count, min_return, max_return, min_profit, target_cum_prob,
+               is_gogo_lamp, is_chance_lamp, expected_roi, motor_rate, synthetic_odds,
                actual_result, payout, profit, is_resolved, hit_status, created_at
         FROM hit_focused_predictions
         {where_sql}
@@ -935,6 +946,7 @@ def get_hit_focused_race_detail(race_id: str) -> Optional[Dict[str, Any]]:
         SELECT race_id, race_date, venue_code, venue_name, race_no, deadline_time,
                top_boat, max_p1, prob_gap, cluster_id, cluster_name, status,
                total_bet, bets_count, min_return, max_return, min_profit, target_cum_prob,
+               is_gogo_lamp, is_chance_lamp, expected_roi, motor_rate, synthetic_odds,
                actual_result, payout, profit, is_resolved, hit_status, created_at
         FROM hit_focused_predictions
         WHERE race_id = {ph};

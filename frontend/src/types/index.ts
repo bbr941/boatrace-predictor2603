@@ -27,8 +27,10 @@ export interface HitFocusedPrediction {
   is_resolved: boolean;
   hit_status?: 'hit' | 'miss' | null | string;
   is_gogo_lamp?: boolean | null;
+  is_chance_lamp?: boolean | null;
   expected_roi?: number | null;
   motor_rate?: number | null;
+  synthetic_odds?: number | null;
   created_at?: string;
 }
 
@@ -114,15 +116,17 @@ export interface DashboardStats {
 }
 
 /**
- * 的中特化において黄金ベースライン緩和条件（回収率100%超）に達しているか判定 (GOGOランプ点灯判定)
- * 【バックテスト検証済基準】:
- * 1. 本命信頼度: P1 >= 55.0%
- * 2. 好調モーター: 1号艇モーター2連率 >= 40.0%
- * 3. 合成期待回収率: Expected ROI >= 1.15 (115%以上)
- * （2026年実績: 的中率 53.9% / 回収率 110.6% / 8ヶ月中7ヶ月プラス収支）
+ * 的中特化において黄金ベースライン緩和条件（回収率100%超）に達しているか判定
+ * 
+ * 🎰 【Tier 1: GOGO!ランプ (超激アツ)】
+ * 条件: P1 >= 55.0% & モーター2連率 >= 40.0% & 合成期待回収率 >= 1.15
+ * 実績: 的中率 53.9% / 回収率 110.6%
+ * 
+ * ⭐ 【Tier 2: CHANCEランプ (チャンス)】
+ * 条件: P1 >= 55.0% & モーター2連率 >= 36.0% & 合成オッズ >= 2.0 & 期待回収率 >= 1.05
+ * 実績: 的中率 39.6% / 回収率 101.3% (GOGO含む全体では回収率 101.9%)
  */
 export function isGogoLampActive(race: HitFocusedPrediction | RacePrediction): boolean {
-  // DBに保存された is_gogo_lamp フラグがある場合はそれを優先
   if ('is_gogo_lamp' in race && (race as HitFocusedPrediction).is_gogo_lamp !== undefined && (race as HitFocusedPrediction).is_gogo_lamp !== null) {
     return Boolean((race as HitFocusedPrediction).is_gogo_lamp);
   }
@@ -132,10 +136,33 @@ export function isGogoLampActive(race: HitFocusedPrediction | RacePrediction): b
   const mot = (race as HitFocusedPrediction).motor_rate || 0;
   const expRoi = (race as HitFocusedPrediction).expected_roi || 0;
 
-  if (p1 >= 0.55 && mot >= 40.0 && expRoi >= 1.15) {
-    return true;
+  return p1 >= 0.55 && mot >= 40.0 && expRoi >= 1.15;
+}
+
+export function isChanceLampActive(race: HitFocusedPrediction | RacePrediction): boolean {
+  // GOGOランプが点灯している場合はCHANCEランプは点灯しない (Tier 1 優先)
+  if (isGogoLampActive(race)) return false;
+
+  if ('is_chance_lamp' in race && (race as HitFocusedPrediction).is_chance_lamp !== undefined && (race as HitFocusedPrediction).is_chance_lamp !== null) {
+    return Boolean((race as HitFocusedPrediction).is_chance_lamp);
   }
 
-  return false;
+  // フォールバック判定 (P1 >= 55% & Motor >= 36% & 合成オッズ >= 2.0 & ExpROI >= 1.05)
+  const p1 = race.max_p1 || 0;
+  const mot = (race as HitFocusedPrediction).motor_rate || 0;
+  const expRoi = (race as HitFocusedPrediction).expected_roi || 0;
+  const synOdds = (race as HitFocusedPrediction).synthetic_odds || 
+    ((race as HitFocusedPrediction).total_bet && (race as HitFocusedPrediction).min_return 
+      ? (race as HitFocusedPrediction).min_return / (race as HitFocusedPrediction).total_bet 
+      : 0);
+
+  return p1 >= 0.55 && mot >= 36.0 && synOdds >= 2.0 && expRoi >= 1.05;
 }
+
+export function getLampTier(race: HitFocusedPrediction | RacePrediction): 'gogo' | 'chance' | 'none' {
+  if (isGogoLampActive(race)) return 'gogo';
+  if (isChanceLampActive(race)) return 'chance';
+  return 'none';
+}
+
 
