@@ -1,4 +1,5 @@
 export type PredictionMode = 'hit_focused' | 'golden_baseline';
+export type ViewLayout = 'grid' | 'timeline';
 
 export interface HitFocusedPrediction {
   id: number;

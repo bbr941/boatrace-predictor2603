@@ -160,6 +160,89 @@ export async function getRaceBets(raceId: string, mode: PredictionMode): Promise
   }
 }
 
+/**
+ * 複数レースの買い目を一括バッチ取得 (タイムライン・フィード表示用)
+ */
+export async function getBatchRaceBets(raceIds: string[], mode: PredictionMode): Promise<Record<string, BetItem[]>> {
+  if (!raceIds || raceIds.length === 0) return {};
+
+  const result: Record<string, BetItem[]> = {};
+  const missingIds: string[] = [];
+
+  for (const id of raceIds) {
+    const cacheKey = `${mode}:${id}`;
+    if (betsCache[cacheKey]) {
+      result[id] = betsCache[cacheKey];
+    } else {
+      missingIds.push(id);
+    }
+  }
+
+  if (missingIds.length === 0) {
+    return result;
+  }
+
+  if (!isSupabaseConfigured) {
+    for (const id of missingIds) {
+      const mock = generateMockBets(id);
+      betsCache[`${mode}:${id}`] = mock;
+      result[id] = mock;
+    }
+    return result;
+  }
+
+  try {
+    const tableName = mode === 'hit_focused' ? 'hit_focused_bets' : 'recommended_bets';
+    const { data, error } = await supabase
+      .from(tableName)
+      .select('*')
+      .in('race_id', missingIds)
+      .order('bet_amount', { ascending: false })
+      .order('prob', { ascending: false });
+
+    if (error || !data) {
+      console.warn('Batch fetch bets error, falling back to mock:', error?.message);
+      for (const id of missingIds) {
+        const mock = generateMockBets(id);
+        betsCache[`${mode}:${id}`] = mock;
+        result[id] = mock;
+      }
+      return result;
+    }
+
+    for (const row of data) {
+      const rid = row.race_id;
+      if (!result[rid]) result[rid] = [];
+      const item: BetItem = {
+        combination: row.combination,
+        bet_amount: row.bet_amount,
+        prob: row.prob,
+        odds: row.odds,
+        ev: row.ev,
+        expected_return: row.expected_return || Math.round(row.bet_amount * row.odds),
+        profit: row.profit ?? (Math.round(row.bet_amount * row.odds) - 1000),
+      };
+      result[rid].push(item);
+    }
+
+    for (const id of missingIds) {
+      if (!result[id]) {
+        result[id] = [];
+      }
+      betsCache[`${mode}:${id}`] = result[id];
+    }
+
+    return result;
+  } catch (err) {
+    console.error('Batch fetch bets error:', err);
+    for (const id of missingIds) {
+      const mock = generateMockBets(id);
+      result[id] = mock;
+    }
+    return result;
+  }
+}
+
 // ----------------------------------------------------
 // モックデータジェネレーター（キー未設定時・オフライン用）
 // ----------------------------------------------------

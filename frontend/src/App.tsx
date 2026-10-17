@@ -1,20 +1,30 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { PredictionMode, HitFocusedPrediction, RacePrediction, DashboardStats } from './types';
+import { PredictionMode, ViewLayout, HitFocusedPrediction, RacePrediction, DashboardStats } from './types';
 import { getHitFocusedPredictions, getGoldenPredictions, getTodayDateStr } from './services/api';
 import { Header } from './components/Header';
 import { StrategyGuide } from './components/StrategyGuide';
 import { SummaryStats } from './components/SummaryStats';
 import { VenueGrid } from './components/VenueGrid';
+import { TimelineFeed } from './components/TimelineFeed';
 import { RaceDetailModal } from './components/RaceDetailModal';
-import { Loader2 } from 'lucide-react';
+import { Loader2, LayoutGrid, Zap } from 'lucide-react';
 
 export const App: React.FC = () => {
   const [mode, setMode] = useState<PredictionMode>('hit_focused');
+  const [viewLayout, setViewLayout] = useState<ViewLayout>(() => {
+    const saved = localStorage.getItem('boatrace_view_layout');
+    return saved === 'grid' || saved === 'timeline' ? saved : 'timeline';
+  });
   const [selectedDate, setSelectedDate] = useState<string>(getTodayDateStr());
   const [races, setRaces] = useState<(HitFocusedPrediction | RacePrediction)[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [selectedRace, setSelectedRace] = useState<HitFocusedPrediction | RacePrediction | null>(null);
+
+  const handleViewLayoutChange = (layout: ViewLayout) => {
+    setViewLayout(layout);
+    localStorage.setItem('boatrace_view_layout', layout);
+  };
 
   // Fetch races function
   const loadData = useCallback(async () => {
@@ -128,12 +138,56 @@ export const App: React.FC = () => {
           </div>
         )}
 
-        {/* Venue Grid Panels (4 columns PC / 2-3 columns mobile) */}
-        <VenueGrid
-          races={races}
-          selectedRaceId={selectedRace?.race_id}
-          onSelectRace={(race) => setSelectedRace(race)}
-        />
+        {/* View Layout Switcher (会場別グリッド vs 最新タイムライン) */}
+        <div className="flex items-center justify-between bg-slate-900/90 p-1.5 rounded-xl border border-slate-800 shadow-sm">
+          <div className="flex items-center space-x-1.5 w-full sm:w-auto">
+            <button
+              onClick={() => handleViewLayoutChange('timeline')}
+              className={`flex-1 sm:flex-initial flex items-center justify-center space-x-2 px-3.5 py-1.5 rounded-lg text-xs font-bold transition ${
+                viewLayout === 'timeline'
+                  ? 'bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 text-white shadow-md shadow-blue-900/40'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+              }`}
+            >
+              <Zap className="w-3.5 h-3.5 text-amber-300" />
+              <span>⚡ 最新タイムライン (買い目直見)</span>
+              <span className="hidden sm:inline-block px-1.5 py-0.2 rounded-full text-[10px] bg-white/20 text-white font-mono">
+                新着順
+              </span>
+            </button>
+
+            <button
+              onClick={() => handleViewLayoutChange('grid')}
+              className={`flex-1 sm:flex-initial flex items-center justify-center space-x-2 px-3.5 py-1.5 rounded-lg text-xs font-bold transition ${
+                viewLayout === 'grid'
+                  ? 'bg-blue-600 text-white shadow-md shadow-blue-900/40'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+              }`}
+            >
+              <LayoutGrid className="w-3.5 h-3.5" />
+              <span>🏢 会場別グリッド</span>
+            </button>
+          </div>
+
+          <div className="hidden md:flex items-center text-xs text-slate-500 font-mono pr-2">
+            {viewLayout === 'timeline' ? '全場横断・最新順で買い目を即時確認' : '会場コード順・1R〜12Rパネル表示'}
+          </div>
+        </div>
+
+        {/* Dynamic View Rendering: Timeline Feed vs Venue Grid */}
+        {viewLayout === 'timeline' ? (
+          <TimelineFeed
+            races={races}
+            mode={mode}
+            onSelectRace={(race) => setSelectedRace(race)}
+          />
+        ) : (
+          <VenueGrid
+            races={races}
+            selectedRaceId={selectedRace?.race_id}
+            onSelectRace={(race) => setSelectedRace(race)}
+          />
+        )}
       </main>
 
       {/* 3. Fast Detail Modal */}
