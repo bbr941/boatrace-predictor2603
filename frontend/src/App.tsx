@@ -29,6 +29,11 @@ export const App: React.FC = () => {
   // Fetch races function
   const loadData = useCallback(async () => {
     setIsLoading(true);
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then((regs) => {
+        regs.forEach((r) => r.update().catch(() => {}));
+      }).catch(() => {});
+    }
     try {
       if (mode === 'hit_focused') {
         const data = await getHitFocusedPredictions(selectedDate);

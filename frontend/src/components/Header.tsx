@@ -32,7 +32,7 @@ export const Header: React.FC<HeaderProps> = ({
             <div>
               <div className="flex items-center space-x-2">
                 <h1 className="text-base sm:text-lg font-bold text-white tracking-tight flex items-center gap-1.5">
-                  BOATRACE AI <span className="text-xs px-2 py-0.5 rounded bg-blue-600/30 text-blue-400 font-mono border border-blue-500/30">v3.2 Edge</span>
+                  BOATRACE AI <span className="text-xs px-2 py-0.5 rounded bg-blue-600/30 text-blue-400 font-mono border border-blue-500/30">v3.3 Edge</span>
                 </h1>
               </div>
               <p className="text-xs text-slate-400 hidden sm:block">
