@@ -1,5 +1,5 @@
 import React from 'react';
-import { RefreshCw, Calendar, Sparkles, Target, Crown, ShieldAlert } from 'lucide-react';
+import { RefreshCw, Calendar, Target, Crown, Flame, ShieldAlert } from 'lucide-react';
 import { PredictionMode } from '../types';
 import { isSupabaseConfigured } from '../lib/supabase';
 
@@ -52,30 +52,42 @@ export const Header: React.FC<HeaderProps> = ({
           </button>
         </div>
 
-        {/* Center: Strategy Mode Selector */}
-        <div className="flex items-center bg-slate-950 p-1 rounded-xl border border-slate-800 self-stretch sm:self-auto">
+        {/* Center: Strategy Mode Selector (3 Pages) */}
+        <div className="flex items-center bg-slate-950 p-1 rounded-xl border border-slate-800 self-stretch sm:self-auto gap-1">
           <button
             onClick={() => onModeChange('hit_focused')}
-            className={`flex-1 sm:flex-initial flex items-center justify-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+            className={`flex-1 sm:flex-initial flex items-center justify-center space-x-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
               mode === 'hit_focused'
                 ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/30'
                 : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
             }`}
           >
-            <Target className="w-3.5 h-3.5" />
-            <span>🎯 的中率特化 (GOGOランプ)</span>
+            <Target className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">🎯 的中特化</span>
           </button>
 
           <button
             onClick={() => onModeChange('golden_baseline')}
-            className={`flex-1 sm:flex-initial flex items-center justify-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+            className={`flex-1 sm:flex-initial flex items-center justify-center space-x-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
               mode === 'golden_baseline'
                 ? 'bg-amber-600 text-white shadow-lg shadow-amber-600/30'
                 : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
             }`}
           >
-            <Crown className="w-3.5 h-3.5" />
-            <span>👑 黄金ベースライン</span>
+            <Crown className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">👑 黄金ベースライン</span>
+          </button>
+
+          <button
+            onClick={() => onModeChange('manshu_sniper')}
+            className={`flex-1 sm:flex-initial flex items-center justify-center space-x-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+              mode === 'manshu_sniper'
+                ? 'bg-gradient-to-r from-rose-600 to-orange-600 text-white shadow-lg shadow-rose-600/30'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+            }`}
+          >
+            <Flame className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">💣 万舟スナイパー</span>
           </button>
         </div>
 

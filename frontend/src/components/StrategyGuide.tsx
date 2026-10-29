@@ -9,6 +9,79 @@ interface StrategyGuideProps {
 export const StrategyGuide: React.FC<StrategyGuideProps> = ({ mode = 'hit_focused' }) => {
   const [isOpen, setIsOpen] = useState<boolean>(true);
 
+  if (mode === 'manshu_sniper') {
+    return (
+      <div className="bg-slate-900/80 border border-rose-500/30 rounded-xl overflow-hidden shadow-lg transition-all duration-200">
+        <button
+          onClick={() => setIsOpen(!isOpen)}
+          className="w-full px-4 py-3 bg-gradient-to-r from-rose-950/60 via-slate-900 to-orange-950/50 hover:bg-slate-800/80 flex items-center justify-between text-left transition"
+        >
+          <div className="flex items-center space-x-2.5">
+            <div className="p-1.5 rounded-lg bg-rose-600/20 text-rose-400 border border-rose-500/40 shadow-[0_0_10px_rgba(244,63,94,0.3)]">
+              <Flame className="w-4 h-4 text-rose-400" />
+            </div>
+            <div>
+              <div className="flex items-center flex-wrap gap-2">
+                <span className="font-bold text-sm sm:text-base text-slate-100">
+                  【万舟スナイパー】イン過信崩壊 × 外枠穴オーバーレイ特化
+                </span>
+                <span className="px-2 py-0.5 rounded-full text-[10px] font-black italic bg-gradient-to-r from-rose-600 to-orange-500 text-white border border-rose-400/50 shadow-[0_0_8px_rgba(244,63,94,0.6)] animate-pulse">
+                  🔥 2026年OOT検証: 回収率 443.5% (Tier 1)
+                </span>
+              </div>
+              <p className="text-xs text-slate-400">
+                100〜500倍帯の歪みを100円均等×最大8点（1R最大800円）で射抜く超少額・超高回収スナイプ戦略
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center space-x-2 text-slate-400 text-xs">
+            <span className="hidden sm:inline">{isOpen ? '閉じる' : '詳細を展開'}</span>
+            {isOpen ? <ChevronUp className="w-4 h-4 text-rose-400" /> : <ChevronDown className="w-4 h-4" />}
+          </div>
+        </button>
+
+        {isOpen && (
+          <div className="p-4 border-t border-slate-800/80 bg-slate-950/60 space-y-3 text-xs text-slate-300">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div className="bg-slate-900/90 border border-rose-900/40 rounded-lg p-3">
+                <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-rose-600/20 text-rose-400 border border-rose-500/30">
+                  1. イン過信の逆張り検知
+                </span>
+                <p className="text-slate-400 mt-2 leading-relaxed">
+                  市場オッズ勝率に対してAI残差モデルが「1号艇は5%〜6%以上危ない」と判定したイン過信危険レースのみを抽出。
+                </p>
+              </div>
+              <div className="bg-slate-900/90 border border-orange-900/40 rounded-lg p-3">
+                <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-orange-600/20 text-orange-400 border border-orange-500/30">
+                  2. 外枠(4-6号艇)穴オーバーレイ
+                </span>
+                <p className="text-slate-400 mt-2 leading-relaxed">
+                  4・5・6号艇のいずれかに市場が見落としている+4%〜+5%以上のAI残差エッジが発生しているレースに限定。
+                </p>
+              </div>
+              <div className="bg-gradient-to-b from-rose-950/40 via-slate-900/90 to-orange-950/30 border border-rose-500/40 rounded-lg p-3">
+                <span className="text-[11px] font-black px-2 py-0.5 rounded bg-rose-600/30 text-rose-300 border border-rose-400/50">
+                  3. 2段階万舟シグナル (100円×最大8点)
+                </span>
+                <div className="text-[11px] text-slate-300 mt-2 space-y-1 leading-relaxed">
+                  <div>
+                    <strong className="text-rose-400">🔥 激熱万舟 (Tier 1)</strong>: 1号艇過信≧6% × 外枠穴≧5%
+                    <div className="text-amber-300 font-mono text-[10px]">2026年OOT: 万舟的中率10.5% / 回収率443.5% (+106,820円)</div>
+                  </div>
+                  <div>
+                    <strong className="text-amber-400">💣 万舟好機 (Tier 2)</strong>: 1号艇過信≧5% × 外枠穴≧4%
+                    <div className="text-amber-300 font-mono text-[10px]">2026年OOT: 万舟的中率5.9% / 回収率243.2% (+96,240円)</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   if (mode === 'golden_baseline') {
     return (
       <div className="bg-slate-900/80 border border-slate-800 rounded-xl overflow-hidden shadow-lg transition-all duration-200">

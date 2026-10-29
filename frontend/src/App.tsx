@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { PredictionMode, ViewLayout, HitFocusedPrediction, RacePrediction, DashboardStats } from './types';
-import { getHitFocusedPredictions, getGoldenPredictions, getTodayDateStr } from './services/api';
+import { getHitFocusedPredictions, getGoldenPredictions, getManshuPredictions, getTodayDateStr } from './services/api';
 import { Header } from './components/Header';
 import { StrategyGuide } from './components/StrategyGuide';
 import { SummaryStats } from './components/SummaryStats';
@@ -32,6 +32,9 @@ export const App: React.FC = () => {
     try {
       if (mode === 'hit_focused') {
         const data = await getHitFocusedPredictions(selectedDate);
+        setRaces(data);
+      } else if (mode === 'manshu_sniper') {
+        const data = await getManshuPredictions(selectedDate);
         setRaces(data);
       } else {
         const data = await getGoldenPredictions(selectedDate);

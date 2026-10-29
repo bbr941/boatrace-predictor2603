@@ -18,6 +18,7 @@ export const RaceButton: React.FC<RaceButtonProps> = ({ race, isSelected, onClic
   const minProfit = (race as HitFocusedPrediction).min_profit || 0;
   const isGogo = isGogoLampActive(race);
   const isChance = isChanceLampActive(race);
+  const isManshu = race.status.includes('manshu');
 
   // Visual Styles based on status
   let cardStyle = "bg-slate-900/40 border-slate-800/80 text-slate-500 hover:border-slate-700";
@@ -86,7 +87,7 @@ export const RaceButton: React.FC<RaceButtonProps> = ({ race, isSelected, onClic
     // レース前
     if (isGo) {
       if (isGogo) {
-        // 🎰 GOGOランプ点灯 (Tier 1: 回収率110%超)
+        // 🎰 GOGOランプ点灯 / 🔥 激熱万舟 (Tier 1)
         cardStyle = "bg-gradient-to-b from-purple-950/80 via-slate-900 to-pink-950/50 border-pink-500/70 text-pink-100 hover:border-pink-400 shadow-xl shadow-pink-950/40 hover:scale-[1.02] ring-1 ring-pink-500/50";
         contentNode = (
           <div className="flex flex-col items-center justify-center py-1">
@@ -94,12 +95,12 @@ export const RaceButton: React.FC<RaceButtonProps> = ({ race, isSelected, onClic
               <span>🎯 {betsCount}点 ({totalBet.toLocaleString()}円)</span>
             </div>
             <div className="text-[11px] text-amber-300 font-mono font-black drop-shadow-[0_0_4px_rgba(245,158,11,0.8)]">
-              ★期待回収110%超 (激熱)
+              {isManshu ? '★回収443%検証 (激熱)' : '★期待回収110%超 (激熱)'}
             </div>
           </div>
         );
       } else if (isChance) {
-        // ⭐ CHANCEランプ点灯 (Tier 2: 回収率101%超)
+        // ⭐ CHANCEランプ点灯 / 💣 万舟好機 (Tier 2)
         cardStyle = "bg-gradient-to-b from-amber-950/70 via-slate-900 to-yellow-950/40 border-amber-400/70 text-amber-100 hover:border-amber-300 shadow-lg shadow-amber-950/30 hover:scale-[1.02] ring-1 ring-amber-400/50";
         contentNode = (
           <div className="flex flex-col items-center justify-center py-1">
@@ -107,7 +108,7 @@ export const RaceButton: React.FC<RaceButtonProps> = ({ race, isSelected, onClic
               <span>🎯 {betsCount}点 ({totalBet.toLocaleString()}円)</span>
             </div>
             <div className="text-[11px] text-amber-300 font-mono font-black drop-shadow-[0_0_4px_rgba(245,158,11,0.8)]">
-              ★期待回収101%超 (好機)
+              {isManshu ? '★回収243%検証 (好機)' : '★期待回収101%超 (好機)'}
             </div>
           </div>
         );
@@ -155,11 +156,11 @@ export const RaceButton: React.FC<RaceButtonProps> = ({ race, isSelected, onClic
           {/* Lamp in Header */}
           {isGogo ? (
             <span className="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded bg-gradient-to-r from-purple-900 to-pink-900 border border-pink-400 text-pink-200 shadow-[0_0_8px_rgba(236,72,153,0.8)] animate-pulse font-black italic text-[9px] tracking-tight">
-              GOGO!
+              {isManshu ? '🔥激熱万舟' : 'GOGO!'}
             </span>
           ) : isChance ? (
             <span className="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded bg-gradient-to-r from-amber-900 to-orange-900 border border-amber-300 text-amber-200 shadow-[0_0_8px_rgba(245,158,11,0.7)] animate-pulse font-black italic text-[9px] tracking-tight">
-              CHANCE
+              {isManshu ? '💣万舟好機' : 'CHANCE'}
             </span>
           ) : null}
         </div>

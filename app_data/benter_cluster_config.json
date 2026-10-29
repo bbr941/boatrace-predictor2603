@@ -8,8 +8,8 @@
                 23,
                 24
             ],
-            "d2": 0.5,
-            "d3": 0.75
+            "d2": 0.25,
+            "d3": 0.35
         },
         "cluster_1": {
             "name": "難水面・イン受難",
@@ -26,13 +26,13 @@
         "cluster_2": {
             "name": "標準水面",
             "venues": "others",
-            "d2": 0.1,
+            "d2": 0.15,
             "d3": 0.25
         }
     },
-    "best_roi": 0.9919443226654976,
-    "total_profit": -7350.0,
-    "mdd_amt": 201600.0,
-    "hit_rate": 0.06422018348623854,
-    "betted_races": 327
+    "best_roi": 1.5979,
+    "total_profit": 469300.0,
+    "mdd_amt": 74000.0,
+    "hit_rate": 0.088,
+    "betted_races": 341
 }

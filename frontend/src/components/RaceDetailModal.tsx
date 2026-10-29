@@ -71,16 +71,16 @@ export const RaceDetailModal: React.FC<RaceDetailModalProps> = ({ race, mode, on
                   {race.venue_name} {race.race_no}R
                 </h3>
                 <span className="text-xs px-2 py-0.5 rounded bg-blue-600/20 text-blue-400 font-mono border border-blue-500/30">
-                  {mode === 'hit_focused' ? '的中特化' : '黄金ベースライン'}
+                  {mode === 'hit_focused' ? '🎯 的中特化' : mode === 'manshu_sniper' ? '💣 万舟スナイパー' : '👑 黄金ベースライン'}
                 </span>
                 {isGogo ? (
                   <span className="px-2 py-0.5 rounded text-[10px] font-black italic bg-gradient-to-r from-pink-600 to-purple-600 text-white border border-pink-400 shadow-[0_0_8px_rgba(236,72,153,0.8)] animate-pulse">
-                    🎰 GOGO! (110%)
+                    {mode === 'manshu_sniper' ? '🔥 激熱万舟 (回収443%)' : '🎰 GOGO! (110%)'}
                   </span>
                 ) : isChance ? (
                   <span className="px-2 py-0.5 rounded text-[10px] font-black italic bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 border border-amber-300 shadow-[0_0_8px_rgba(245,158,11,0.7)] animate-pulse flex items-center gap-0.5">
                     <Star className="w-2.5 h-2.5 fill-slate-950 text-slate-950" />
-                    CHANCE (101%)
+                    {mode === 'manshu_sniper' ? '💣 万舟好機 (回収243%)' : 'CHANCE (101%)'}
                   </span>
                 ) : null}
               </div>

@@ -58,13 +58,12 @@ def add_advanced_features(df):
     else:
         df['corrected_st'] = 0.20
         
-    df = df.sort_values(['race_id', 'boat_number'])
+    sort_col = 'pred_course' if 'pred_course' in df.columns else 'boat_number'
+    df = df.sort_values(['race_id', sort_col])
     
-    prev_race_ids = df['race_id'].shift(1)
-    prev_sts = df['corrected_st'].shift(1)
-    
-    df['inner_st_gap_corrected'] = df['corrected_st'] - prev_sts
-    df.loc[df['race_id'] != prev_race_ids, 'inner_st_gap_corrected'] = 0.0
+    prev_sts = df.groupby('race_id')['corrected_st'].shift(1)
+    df['inner_st_gap_corrected'] = (df['corrected_st'] - prev_sts).fillna(0.0)
+    df.loc[df[sort_col] == 1, 'inner_st_gap_corrected'] = 0.0
     
     # 2. Motor Evaluation Gap (Motor Rank - Tenji Rank)
     if 'motor_rate' in df.columns and 'exhibition_time' in df.columns:
@@ -76,8 +75,10 @@ def add_advanced_features(df):
         df['tenji_rank'] = 3.5
         df['motor_gap'] = 0.0
     
-    # 3. Specialist Gap
-    if 'course_1st_rate' in df.columns and 'nat_win_rate' in df.columns:
+    # 3. Specialist Gap (Course 2-ren rate minus National 2-ren rate, both 0-100% scale)
+    if 'course_quinella_rate' in df.columns and 'nat_quinella_rate' in df.columns:
+        df['specialist_score'] = (df['course_quinella_rate'] - df['nat_quinella_rate']).fillna(0.0)
+    elif 'course_1st_rate' in df.columns and 'nat_win_rate' in df.columns:
         df['specialist_score'] = df['course_1st_rate'] - df['nat_win_rate']
     else:
         df['specialist_score'] = 0.0
@@ -91,17 +92,18 @@ def add_advanced_features(df):
         df['my_sashi_rate'] = calc_rate('sashi_count', 'course_run_count') if 'sashi_count' in df.columns else 0.0
         df['my_makuri_rate'] = calc_rate('makuri_count', 'course_run_count') if 'makuri_count' in df.columns else 0.0
         
-        inner_nige_rate = df['my_nige_rate'].shift(1)
-        df['sashi_potential'] = df['my_sashi_rate'] / (inner_nige_rate + 0.01)
-        df.loc[df['boat_number'] == 1, 'sashi_potential'] = 0.0
+        c1_nige_rate = df.groupby('race_id')['my_nige_rate'].transform('first')
+        df['sashi_potential'] = (df['my_sashi_rate'] * (1.0 - c1_nige_rate)).fillna(0.0)
+        df.loc[df[sort_col] == 1, 'sashi_potential'] = 0.0
         
         df['st_rank'] = df.groupby('race_id')['corrected_st'].rank(ascending=True)
-        inner_st_rank = df['st_rank'].shift(1)
-        df['makuri_potential'] = df['my_makuri_rate'] * inner_st_rank
-        df.loc[df['boat_number'] == 1, 'makuri_potential'] = 0.0
+        inner_st_rank = df.groupby('race_id')['st_rank'].shift(1).fillna(3.5)
+        df['makuri_potential'] = (df['my_makuri_rate'] * inner_st_rank).fillna(0.0)
+        df.loc[df[sort_col] == 1, 'makuri_potential'] = 0.0
     else:
         df['sashi_potential'] = 0.0
         df['makuri_potential'] = 0.0
+    df = df.sort_values(['race_id', 'boat_number'])
 
     # 5. Venue Frame Bias
     bias_path = 'app_data/venue_frame_bias.csv'
@@ -133,10 +135,11 @@ def add_advanced_features(df):
         rank_map = {'A1': 4, 'A2': 3, 'B1': 2, 'B2': 1}
         df['rank_numeric'] = df['racer_rank'].map(rank_map).fillna(2).astype(int)
         
+        rank_mean_lookup = {4: 6.6695, 3: 5.7890, 2: 4.5525, 1: 2.6491}
         if 'nat_win_rate' in df.columns:
             df['level_adjusted_win_rate'] = df['nat_win_rate'] * df['rank_numeric']
-            rank_means = df.groupby('racer_rank')['nat_win_rate'].transform('mean')
-            df['rank_skill_gap'] = (df['nat_win_rate'] - rank_means).fillna(0.0)
+            expected_rank_mean = df['rank_numeric'].map(rank_mean_lookup).fillna(4.5525)
+            df['rank_skill_gap'] = (df['nat_win_rate'] - expected_rank_mean).fillna(0.0)
         else:
             df['level_adjusted_win_rate'] = 0.0
             df['rank_skill_gap'] = 0.0

@@ -1,4 +1,4 @@
-export type PredictionMode = 'hit_focused' | 'golden_baseline';
+export type PredictionMode = 'hit_focused' | 'golden_baseline' | 'manshu_sniper';
 export type ViewLayout = 'grid' | 'timeline';
 
 export interface HitFocusedPrediction {
@@ -31,6 +31,8 @@ export interface HitFocusedPrediction {
   expected_roi?: number | null;
   motor_rate?: number | null;
   synthetic_odds?: number | null;
+  b1_drop?: number | null;
+  outer_ov?: number | null;
   created_at?: string;
 }
 

@@ -180,9 +180,9 @@ def load_benter_cluster_config(filepath=BENTER_CLUSTER_CONFIG_PATH):
     global _DEFAULT_CLUSTER_CONFIG
     default_config = {
         'clusters': {
-            'cluster_0': {'name': 'イン超強水面', 'venues': [18, 21, 23, 24], 'd2': 0.50, 'd3': 0.75},
+            'cluster_0': {'name': 'イン超強水面', 'venues': [18, 21, 23, 24], 'd2': 0.25, 'd3': 0.35},
             'cluster_1': {'name': '難水面・イン受難', 'venues': [2, 3, 4, 14, 22], 'd2': 0.20, 'd3': 0.20},
-            'cluster_2': {'name': '標準水面', 'venues': 'others', 'd2': 0.10, 'd3': 0.25}
+            'cluster_2': {'name': '標準水面', 'venues': 'others', 'd2': 0.15, 'd3': 0.25}
         }
     }
     if os.path.exists(filepath):
@@ -216,13 +216,13 @@ def get_cluster_benter_params(venue_code, config=None):
 
     if v_int in c0_venues:
         c_info = config.get('clusters', {}).get('cluster_0', {})
-        return float(c_info.get('d2', 0.50)), float(c_info.get('d3', 0.75)), 0, c_info.get('name', 'イン超強水面')
+        return float(c_info.get('d2', 0.25)), float(c_info.get('d3', 0.35)), 0, c_info.get('name', 'イン超強水面')
     elif v_int in c1_venues:
         c_info = config.get('clusters', {}).get('cluster_1', {})
         return float(c_info.get('d2', 0.20)), float(c_info.get('d3', 0.20)), 1, c_info.get('name', '難水面・イン受難')
     else:
         c_info = config.get('clusters', {}).get('cluster_2', {})
-        return float(c_info.get('d2', 0.10)), float(c_info.get('d3', 0.25)), 2, c_info.get('name', '標準水面')
+        return float(c_info.get('d2', 0.15)), float(c_info.get('d3', 0.25)), 2, c_info.get('name', '標準水面')
 
 
 def calculate_benter_probs(honmei_scores_dict, d2=1.0, d3=1.0, calibration_method='platt', calibrator=None):

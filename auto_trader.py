@@ -72,6 +72,8 @@ logger = logging.getLogger("AutoTrader")
 BASE_DIR = CURRENT_DIR
 MODEL_HONMEI_PATH = os.path.join(BASE_DIR, 'model_honmei.txt')
 MODEL_RESIDUAL_PATH = os.path.join(BASE_DIR, 'model_residual.txt')
+MODEL_2ND_PATH = os.path.join(BASE_DIR, 'model_2nd.txt')
+MODEL_3RD_PATH = os.path.join(BASE_DIR, 'model_3rd.txt')
 DATA_DIR = os.path.join(BASE_DIR, 'app_data')
 CLUSTER_1_VENUES = [2, 3, 4, 14, 22]  # 戸田02, 江戸川03, 平和島04, 鳴門14, 福岡22
 
@@ -390,6 +392,7 @@ class BoatRaceScraper:
 
                 branch = 'Unknown'
                 weight = 52.0
+                racer_rank = 'B1'
                 try:
                     td2 = tb.select("td")[2]
                     txt_full = td2.get_text(" ", strip=True)
@@ -398,20 +401,39 @@ class BoatRaceScraper:
                     prefectures = r"(群馬|埼玉|東京|福井|静岡|愛知|三重|滋賀|大阪|兵庫|徳島|香川|岡山|広島|山口|福岡|佐賀|長崎)"
                     m = re.search(prefectures, txt_full)
                     if m: branch = m.group(1)
+                    m_rank = re.search(r'(A1|A2|B1|B2)', txt_full)
+                    if m_rank: racer_rank = m_rank.group(1)
                 except Exception: pass
 
                 nat_win_rate = 0.0
+                nat_quinella_rate = 0.0
                 local_win_rate = 0.0
                 try:
-                    col3_txt = tb.select("td")[3].get_text(" ", strip=True)
-                    clean_txt = re.sub(r'[FLK]\d+', '', col3_txt) 
-                    nums = re.findall(r'(\d+(?:\.\d+)?)', clean_txt)
-                    if len(nums) >= 5:
-                        nat_win_rate = float(nums[1])
-                        local_win_rate = float(nums[3])
-                    elif len(nums) >= 4:
-                        nat_win_rate = float(nums[0])
-                        local_win_rate = float(nums[2])
+                    tds_all = tb.select("td")
+                    if len(tds_all) > 5:
+                        # 現行レイアウト: td[4]=全国(勝率 2連率 3連率), td[5]=当地(勝率 2連率 3連率)
+                        nums_nat = re.findall(r'(\d+(?:\.\d+)?)', tds_all[4].get_text(" ", strip=True))
+                        if len(nums_nat) >= 2:
+                            nat_win_rate = float(nums_nat[0])
+                            nat_quinella_rate = float(nums_nat[1])
+                        elif len(nums_nat) == 1:
+                            nat_win_rate = float(nums_nat[0])
+                        nums_loc = re.findall(r'(\d+(?:\.\d+)?)', tds_all[5].get_text(" ", strip=True))
+                        if len(nums_loc) >= 1:
+                            local_win_rate = float(nums_loc[0])
+                    if nat_win_rate == 0.0 and len(tds_all) > 3:
+                        # 旧レイアウト互換フォールバック
+                        col3_txt = tds_all[3].get_text(" ", strip=True)
+                        clean_txt = re.sub(r'[FLK]\d+', '', col3_txt) 
+                        nums = re.findall(r'(\d+(?:\.\d+)?)', clean_txt)
+                        if len(nums) >= 5:
+                            nat_win_rate = float(nums[1])
+                            nat_quinella_rate = float(nums[2])
+                            local_win_rate = float(nums[3])
+                        elif len(nums) >= 4:
+                            nat_win_rate = float(nums[0])
+                            nat_quinella_rate = float(nums[1])
+                            local_win_rate = float(nums[2])
                 except Exception: pass
 
                 prior_results = ""
@@ -463,7 +485,9 @@ class BoatRaceScraper:
                     'prior_results': prior_results,
                     'branch': branch,
                     'weight': weight,
+                    'racer_rank': racer_rank,
                     'nat_win_rate': nat_win_rate,
+                    'nat_quinella_rate': nat_quinella_rate,
                     'local_win_rate': local_win_rate
                 }
 
@@ -489,11 +513,12 @@ def add_advanced_features(df: pd.DataFrame) -> pd.DataFrame:
         
     if 'race_id' not in df.columns:
         df['race_id'] = 'single_race'
-    df = df.sort_values(['race_id', 'boat_number'])
+    sort_col = 'pred_course' if 'pred_course' in df.columns else 'boat_number'
+    df = df.sort_values(['race_id', sort_col])
 
-    prev_sts = df['corrected_st'].shift(1)
-    df['inner_st_gap_corrected'] = df['corrected_st'] - prev_sts
-    df.loc[df['boat_number'] == 1, 'inner_st_gap_corrected'] = 0.0
+    prev_sts = df.groupby('race_id')['corrected_st'].shift(1)
+    df['inner_st_gap_corrected'] = (df['corrected_st'] - prev_sts).fillna(0.0)
+    df.loc[df[sort_col] == 1, 'inner_st_gap_corrected'] = 0.0
     
     if 'motor_rate' in df.columns and 'exhibition_time' in df.columns:
         df['motor_rank'] = df.groupby('race_id')['motor_rate'].rank(ascending=False, method='min')
@@ -502,7 +527,11 @@ def add_advanced_features(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df['motor_gap'] = 0.0
         
-    if 'venue_course_1st_rate' in df.columns and 'nat_win_rate' in df.columns:
+    if 'course_quinella_rate' in df.columns and 'nat_quinella_rate' in df.columns:
+        df['specialist_score'] = (df['course_quinella_rate'] - df['nat_quinella_rate']).fillna(0.0)
+    elif 'course_1st_rate' in df.columns and 'nat_win_rate' in df.columns:
+        df['specialist_score'] = df['course_1st_rate'] - df['nat_win_rate']
+    elif 'venue_course_1st_rate' in df.columns and 'nat_win_rate' in df.columns:
         df['specialist_score'] = df['venue_course_1st_rate'] - df['nat_win_rate']
     else:
         df['specialist_score'] = 0.0
@@ -512,19 +541,20 @@ def add_advanced_features(df: pd.DataFrame) -> pd.DataFrame:
         df['my_sashi_rate'] = df['sashi_count'] / (df['course_run_count'] + 1.0)
         df['my_makuri_rate'] = df['makuri_count'] / (df['course_run_count'] + 1.0)
         
-        inner_nige_rate = df['my_nige_rate'].shift(1)
-        df['sashi_potential'] = df['my_sashi_rate'] / (inner_nige_rate + 0.01)
-        df.loc[df['boat_number'] == 1, 'sashi_potential'] = 0
+        c1_nige_rate = df.groupby('race_id')['my_nige_rate'].transform('first')
+        df['sashi_potential'] = (df['my_sashi_rate'] * (1.0 - c1_nige_rate)).fillna(0.0)
+        df.loc[df[sort_col] == 1, 'sashi_potential'] = 0.0
         
         df['st_rank'] = df.groupby('race_id')['corrected_st'].rank(ascending=True)
-        inner_st_rank = df['st_rank'].shift(1)
-        df['makuri_potential'] = df['my_makuri_rate'] * inner_st_rank
-        df.loc[df['boat_number'] == 1, 'makuri_potential'] = 0
+        inner_st_rank = df.groupby('race_id')['st_rank'].shift(1).fillna(3.5)
+        df['makuri_potential'] = (df['my_makuri_rate'] * inner_st_rank).fillna(0.0)
+        df.loc[df[sort_col] == 1, 'makuri_potential'] = 0.0
     else:
         df['sashi_potential'] = 0.0
         df['makuri_potential'] = 0.0
+    df = df.sort_values(['race_id', 'boat_number'])
         
-    bias_path = 'app_data/venue_frame_bias.csv'
+    bias_path = os.path.join(DATA_DIR, 'venue_frame_bias.csv')
     if os.path.exists(bias_path):
         try:
             bias_df = pd.read_csv(bias_path)
@@ -547,6 +577,23 @@ def add_advanced_features(df: pd.DataFrame) -> pd.DataFrame:
             df['venue_frame_win_rate'] = 0.16
     else:
         df['venue_frame_win_rate'] = 0.16
+
+    # 級別関連特徴量 (racer_rank_num, rank_numeric, level_adjusted_win_rate, rank_skill_gap)
+    rank_map = {'A1': 4, 'A2': 3, 'B1': 2, 'B2': 1}
+    if 'racer_rank' in df.columns:
+        df['racer_rank_num'] = df['racer_rank'].astype(str).str.strip().map(rank_map).fillna(2).astype(int)
+    elif 'racer_rank_num' not in df.columns:
+        df['racer_rank_num'] = 2
+    df['rank_numeric'] = df['racer_rank_num']
+
+    rank_mean_lookup = {4: 6.6695, 3: 5.7890, 2: 4.5525, 1: 2.6491}
+    if 'nat_win_rate' in df.columns:
+        df['level_adjusted_win_rate'] = df['nat_win_rate'] * df['rank_numeric']
+        expected_rank_mean = df['rank_numeric'].map(rank_mean_lookup).fillna(4.5525)
+        df['rank_skill_gap'] = (df['nat_win_rate'] - expected_rank_mean).fillna(0.0)
+    else:
+        df['level_adjusted_win_rate'] = 0.0
+        df['rank_skill_gap'] = 0.0
         
     return df
 
@@ -730,9 +777,21 @@ class FeatureEngineer:
             elif 'WinRate' in df.columns:
                  df['local_win_rate'] = df['WinRate']
 
-            df = df.merge(v_course, left_on=['venue_code_int', 'pred_course'], right_on=['venue_code', 'course_number'], how='left')
+            v_course_clean = v_course.rename(columns={'venue_code': 'vc_join'})
+            df = df.merge(v_course_clean, left_on=['venue_code_int', 'pred_course'], right_on=['vc_join', 'course_number'], how='left')
+            df.drop(columns=['vc_join'], inplace=True, errors='ignore')
+            df['venue_code_y'] = df['venue_code_int'].astype(str).str.zfill(2)
             df.rename(columns={'rate_1st': 'venue_course_1st_rate', 'rate_2nd': 'venue_course_2nd_rate', 'rate_3rd': 'venue_course_3rd_rate'}, inplace=True)
-            df = df.merge(r_params, on='racer_id', how='left')
+            
+            # r_params からは st_std_dev のみをマージし、nat_win_rate / nige_count 等の列名衝突 (_x, _y) を完全に防止
+            r_params_clean = r_params[['racer_id', 'st_std_dev']].drop_duplicates(subset=['racer_id']) if 'st_std_dev' in r_params.columns else r_params[['racer_id']].drop_duplicates()
+            df = df.merge(r_params_clean, on='racer_id', how='left')
+            if 'nat_win_rate' in r_params.columns:
+                nw_map = dict(zip(r_params['racer_id'], r_params['nat_win_rate']))
+                if 'nat_win_rate' in df.columns:
+                    df['nat_win_rate'] = pd.to_numeric(df['nat_win_rate'], errors='coerce').replace(0.0, np.nan).fillna(df['racer_id'].map(nw_map)).fillna(0.0)
+                else:
+                    df['nat_win_rate'] = df['racer_id'].map(nw_map).fillna(0.0)
         except Exception as e:
             logger.warning(f"⚠️ 静的マスタ特徴量マージ例外 (デフォルト値で補完します): {e}")
         
@@ -743,6 +802,8 @@ class FeatureEngineer:
             'sashi_count': 0.0,
             'makurizashi_count': 0.0,
             'nat_win_rate': 0.0,
+            'nat_quinella_rate': 0.0,
+            'st_std_dev': 0.05,
             'course_run_count': 0.0,
             'local_win_rate': 0.0,
             'course_quinella_rate': 0.0,
@@ -762,13 +823,12 @@ class FeatureEngineer:
                 df[c] = df[c].fillna(def_val)
             
         def parse_prior(x):
-            if isinstance(x, (int, float)): return float(x)
+            if isinstance(x, (int, float)) and not np.isnan(x):
+                x = str(int(x))
             if not isinstance(x, str): return 3.5
             try:
-                x_c = re.sub(r'[欠失FLS]', '', x)
-                parts = x_c.split()
-                ranks = [float(p) for p in parts if p.isdigit()]
-                if ranks: return sum(ranks)/len(ranks)
+                ranks = [float(c) for c in x if c in '123456']
+                if ranks: return sum(ranks) / len(ranks)
             except Exception: pass
             return 3.5
             
@@ -782,13 +842,14 @@ class FeatureEngineer:
         # Advanced Features
         df = add_advanced_features(df)
         df = df.sort_values('pred_course')
-        st_col = 'corrected_st' if 'corrected_st' in df.columns else 'exhibition_start_timing'
         
-        df['inner_st'] = df[st_col].shift(1).fillna(0) if st_col in df.columns else 0.0
-        df['inner_st_gap'] = df[st_col] - df['inner_st'] if st_col in df.columns else 0.0
-        df['outer_st'] = df[st_col].shift(-1).fillna(0) if st_col in df.columns else 0.0
-        avg_neighbor = (df['inner_st'] + df['outer_st']) / 2
-        df['slit_formation'] = df[st_col] - avg_neighbor if st_col in df.columns else 0.0
+        # 学習時 (make_data_set.py) と完全一致: inner_st_gap と slit_formation は exhibition_start_timing から算出
+        ex_st_s = pd.to_numeric(df['exhibition_start_timing'], errors='coerce').fillna(0.15) if 'exhibition_start_timing' in df.columns else pd.Series(0.15, index=df.index)
+        inner_st_s = ex_st_s.shift(1)
+        df['inner_st_gap'] = (ex_st_s - inner_st_s).fillna(0.0)
+        outer_st_s = ex_st_s.shift(-1)
+        avg_neighbor = (inner_st_s.fillna(ex_st_s) + outer_st_s.fillna(ex_st_s)) / 2.0
+        df['slit_formation'] = (ex_st_s - avg_neighbor).fillna(0.0)
 
         c1_nige = df.loc[df['pred_course']==1, 'nige_rate']
         val = c1_nige.values[0] if len(c1_nige) > 0 else 0.5
@@ -837,15 +898,15 @@ class FeatureEngineer:
         df['wind_makuri_cross'] = df['wind_speed'] * df['makuri_rate']
         df['strong_wind_makuri'] = df['is_strong_wind'] * df['makuri_rate']
         df['wind_makurizashi_cross'] = df['wind_speed'] * df['makurizashi_rate']
-        df['strong_wind_outer_adv'] = df['is_strong_wind'] * (df['boat_number'] >= 3).astype(float)
-        df['wind_nige_vulnerability'] = df['wind_speed'] * (1.0 - df['nige_rate']) * (df['boat_number'] == 1).astype(float)
+        df['strong_wind_outer_adv'] = df['is_strong_wind'] * (df['pred_course'] >= 3).astype(float)
+        df['wind_nige_vulnerability'] = df['wind_speed'] * (1.0 - df['nige_rate']) * (df['pred_course'] == 1).astype(float)
 
 
         df['wave_weight_prod'] = df['wave_height'] * df['weight']
         df['wave_weight_ratio'] = df['wave_height'] / np.maximum(df['weight'], 40.0)
         df['is_high_wave'] = (df['wave_height'] >= 4.0).astype(float)
         df['high_wave_heavy_penalty'] = df['is_high_wave'] * np.maximum(0.0, df['weight'] - 52.0)
-        df['high_wave_inner_risk'] = df['is_high_wave'] * (df['boat_number'] == 1).astype(float)
+        df['high_wave_inner_risk'] = df['is_high_wave'] * (df['pred_course'] == 1).astype(float)
         
         df['nat_win_rate'] = pd.to_numeric(df['nat_win_rate'], errors='coerce').fillna(0.0)
         df['local_win_rate'] = pd.to_numeric(df['local_win_rate'], errors='coerce').fillna(0.0)
@@ -874,7 +935,7 @@ class FeatureEngineer:
         venue_tailwind_from = {
             '桐生': 135, '戸田': 90, '江戸川': 180, '平和島': 180, '多摩川': 270,
             '浜名湖': 180, '蒲郡': 270, '常滑': 270, '津': 135, '三国': 180,
-            'びわこ': 225, '住之江': 270, '尼崎': 90, '鳴門': 135, '丸亀': 15,
+            'びわこ': 225, '住之江': 270, '尼崎': 90, '鳴門': 135, '丸亀': 180,
             '児島': 225, '宮島': 270, '徳山': 135, '下関': 270, '若松': 270,
             '芦屋': 135, '福岡': 0, '唐津': 135, '大村': 315
         }
@@ -885,15 +946,18 @@ class FeatureEngineer:
 
         if 'race_date' not in df.columns: df['race_date'] = '20000101'
         
-        wind_map = {
-            1: '北', 2: '北北東', 3: '北東', 4: '東北東', 5: '東', 6: '東南東', 7: '南東', 8: '南南東',
-            9: '南', 10: '南南西', 11: '南西', 12: '西南西', 13: '西', 14: '西北西', 15: '北西', 16: '北北西'
+        # LightGBM の pandas_categorical (['北', '北東', '北西', '南', '南東', '南西', '東', '無風', '西']) に完全適合させる
+        wind_map_8 = {
+            0: '無風', 17: '無風', '0': '無風', '17': '無風',
+            1: '北', 2: '北東', 3: '北東', 4: '東', 5: '東', 6: '南東', 7: '南東', 8: '南',
+            9: '南', 10: '南西', 11: '南西', 12: '西', 13: '西', 14: '北西', 15: '北西', 16: '北',
+            '北北東': '北東', '東北東': '東', '東南東': '南東', '南南東': '南',
+            '南南西': '南西', '西南西': '西', '西北西': '北西', '北北西': '北'
         }
-        if pd.api.types.is_numeric_dtype(df['wind_direction']):
-            df['wind_direction'] = df['wind_direction'].replace(wind_map).astype(str).replace('nan', '')
-        else:
-            df['wind_direction'] = df['wind_direction'].astype(str).replace('nan', '')
+        df['wind_direction'] = df['wind_direction'].replace(wind_map_8).astype(str).replace('nan', '無風')
 
+        df = df.loc[:, ~df.columns.duplicated()]
+        df = df.sort_values('boat_number').reset_index(drop=True)
 
         for col in df.columns:
             if col not in ['race_id', 'race_date', 'venue_name', 'prior_results', 'wind_direction', 'branch', 'class', 'racer_class', 'venue_code_y']:
@@ -1113,6 +1177,201 @@ def send_discord_notification(
     except Exception as e:
         logger.error(f"❌ Discord Webhook 送信中にエラーが発生しました: {e}")
         return False
+
+
+# =====================================================================
+# 3.5 万舟スナイパー (💣 万舟スナイパー) 通知 & 算出モジュール
+# =====================================================================
+
+def send_manshu_discord_notification(
+    webhook_url: str,
+    date_str: str,
+    venue_code: int,
+    venue_name: str,
+    race_no: int,
+    deadline_str: str,
+    is_tier1: bool,
+    b1_drop: float,
+    outer_ov: float,
+    outer_boat: int,
+    bets: Dict[str, int],
+    manshu_probs: Dict[str, float],
+    all_odds: Dict[str, float],
+    dry_run: bool = False
+) -> bool:
+    """万舟スナイパー (💣 万舟スナイパー) 発動レースを Discord Webhook へ専用 Embed 送信"""
+    if not bets:
+        return False
+    total_bet = sum(bets.values())
+    returns = [int((amt / 100.0) * all_odds.get(c, 0.0) * 100.0) for c, amt in bets.items()]
+    min_return = min(returns) if returns else 0
+    max_return = max(returns) if returns else 0
+    race_id = f"{date_str}_{venue_code}_{race_no}"
+
+    table_lines = [
+        "```",
+        f"{'買い目':^7} | {'金額':^6} | {'実オッズ':^8} | {'EV':^5} | {'的中払戻':^9}",
+        "-" * 50
+    ]
+    for combo, amt in sorted(bets.items(), key=lambda x: manshu_probs.get(x[0], 0.0), reverse=True):
+        p = manshu_probs.get(combo, 0.0)
+        o = all_odds.get(combo, 0.0)
+        ev = p * o
+        est_ret = int((amt / 100.0) * o * 100.0)
+        table_lines.append(f"{combo:^7} | {amt:>4,d}円 | {o:>6.1f}倍 | {ev:>5.2f} | {est_ret:>7,d}円")
+    table_lines.append("```")
+    bets_formatted_table = "\n".join(table_lines)
+
+    if is_tier1:
+        tier_badge = "🔥 【激熱万舟スナイパー発動 (Tier 1)】"
+        tier_desc = (
+            "**イン過信危険水域 × 外枠急浮上検知！** (2026年OOT検証: **万舟的中率 10.5% / 回収率 443.5%**)\n"
+            "市場が1号艇を過大評価し、4〜6号艇の台頭を見落としている高期待値・少額万舟スナイプレースです。"
+        )
+        embed_color = 0xFF3D00  # クリムゾンオレンジ
+    else:
+        tier_badge = "💣 【万舟スナイパー好機 (Tier 2)】"
+        tier_desc = (
+            "**イン過信 × 外枠穴オーバーレイ検知！** (2026年OOT検証: **万舟的中率 5.9% / 回収率 243.2%**)\n"
+            "オッズ100〜500倍帯にEV≥1.20の歪みが発生している少額100円フラット万舟スナイプレースです。"
+        )
+        embed_color = 0xAA00FF  # ネオンパープル
+
+    title_text = f"{tier_badge} {venue_name} {race_no}R（締切 {deadline_str}）"
+
+    embed = {
+        "title": title_text,
+        "description": tier_desc,
+        "color": embed_color,
+        "fields": [
+            {
+                "name": "📉 1号艇・市場過信度",
+                "value": f"**+{b1_drop:.1%}** (市場勝率 − AI残差)",
+                "inline": True
+            },
+            {
+                "name": "🚀 外枠(4-6号艇) AI激推し",
+                "value": f"**{outer_boat}号艇 (+{outer_ov:.1%})**",
+                "inline": True
+            },
+            {
+                "name": "💰 推奨投資額 (100円均等)",
+                "value": f"**{total_bet:,} 円** ({len(bets)}点 × 100円)",
+                "inline": True
+            },
+            {
+                "name": f"💣 万舟スナイプ買い目 ({len(bets)}点 / 払戻レンジ {min_return:,}円〜{max_return:,}円)",
+                "value": bets_formatted_table,
+                "inline": False
+            }
+        ],
+        "footer": {
+            "text": f"BOATRACE AI Man-shu Sniper (100x-500x) • {date_str[:4]}/{date_str[4:6]}/{date_str[6:]}"
+        },
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
+    }
+
+    logger.info(f"💣 [MANSHU DISCORD TRIGGERED] {venue_name} {race_no}R | {'Tier1(激熱)' if is_tier1 else 'Tier2(好機)'} | 投資: {total_bet:,}円 ({len(bets)}点)")
+
+    try:
+        db_manager.save_notification_log(
+            race_id=race_id,
+            channel='discord_manshu',
+            title=title_text,
+            payload=embed,
+            status='dry_run' if (dry_run or not webhook_url) else 'sent'
+        )
+    except Exception as e:
+        logger.warning(f"万舟通知ログ保存エラー: {e}")
+
+    if dry_run or not webhook_url:
+        logger.info("[DRY-RUN / NO WEBHOOK] 万舟スナイパーDiscord送信をスキップしました:")
+        print("\n" + "=" * 65)
+        print(title_text)
+        print(f"1号艇過信度: +{b1_drop:.1%} | 外枠穴: {outer_boat}号艇 (+{outer_ov:.1%}) | 投資: {total_bet:,}円")
+        print(bets_formatted_table)
+        print("=" * 65 + "\n")
+        return True
+
+    try:
+        resp = requests.post(webhook_url, json={"embeds": [embed]}, timeout=10)
+        if resp.status_code in (200, 204):
+            logger.info("✅ 万舟スナイパー Discord Webhook 送信成功！")
+            return True
+        else:
+            logger.warning(f"⚠️ 万舟スナイパー Discord Webhook 送信失敗 (Status: {resp.status_code}): {resp.text}")
+            return False
+    except Exception as e:
+        logger.error(f"❌ 万舟スナイパー Discord Webhook 送信中にエラーが発生しました: {e}")
+        return False
+
+
+def calculate_manshu_sniper_bets(
+    p1_dict_residual: Dict[int, float],
+    p_norm_syn_dict: Dict[int, float],
+    all_odds: Dict[str, float],
+    d2: float = 0.60,
+    d3: float = 0.80,
+    min_odds: float = 100.0,
+    max_odds: float = 500.0,
+    min_ev: float = 1.20,
+    max_combos: int = 8
+) -> Dict[str, Any]:
+    """
+    万舟スナイパー (💣 万舟スナイパー) の発動判定と100円均等買い目(最大8点)を算出。
+    - Tier 1 (🔥 激熱万舟): b1_drop >= 0.06 かつ outer_ov >= 0.05 (2026年OOT: 万舟的中率10.5%, 回収率443.5%)
+    - Tier 2 (💣 万舟好機): b1_drop >= 0.05 かつ outer_ov >= 0.04 (2026年OOT: 万舟的中率5.9%, 回収率243.2%)
+    """
+    b1_drop = float(p_norm_syn_dict.get(1, 0.0)) - float(p1_dict_residual.get(1, 0.0))
+    outer_diffs = {
+        b: float(p1_dict_residual.get(b, 0.0)) - float(p_norm_syn_dict.get(b, 0.0))
+        for b in (4, 5, 6)
+    }
+    outer_boat = max(outer_diffs, key=outer_diffs.get) if outer_diffs else 4
+    outer_ov = float(outer_diffs.get(outer_boat, 0.0))
+
+    manshu_benter_list, _, _ = calculate_benter_probs(
+        p1_dict_residual,
+        d2=d2,
+        d3=d3,
+        calibration_method='direct'
+    )
+    manshu_probs_dict = {p['combo']: p['prob'] for p in manshu_benter_list}
+
+    candidate_combos = []
+    for combo, prob in manshu_probs_dict.items():
+        o_val = float(all_odds.get(combo, 0.0))
+        if min_odds <= o_val <= max_odds and prob > 0:
+            ev = prob * o_val
+            if ev >= min_ev:
+                candidate_combos.append((combo, prob, o_val, ev))
+
+    candidate_combos.sort(key=lambda x: x[1], reverse=True)
+    selected = candidate_combos[:max_combos]
+
+    is_tier1_cond = (b1_drop >= 0.06) and (outer_ov >= 0.05) and (len(selected) > 0)
+    is_tier2_cond = (not is_tier1_cond) and (b1_drop >= 0.05) and (outer_ov >= 0.04) and (len(selected) > 0)
+    is_manshu_go = is_tier1_cond or is_tier2_cond
+
+    bets_manshu = {c: 100 for c, _, _, _ in selected} if is_manshu_go else {}
+    cum_prob = sum(p for _, p, _, _ in selected) if is_manshu_go else 0.0
+    exp_roi = (sum(p * o * 100.0 for _, p, o, _ in selected) / (len(selected) * 100.0)) if (is_manshu_go and selected) else 0.0
+    inv_sum = sum(1.0 / o for _, _, o, _ in selected if o > 0) if is_manshu_go else 0.0
+    syn_odds = (1.0 / inv_sum) if inv_sum > 0 else 0.0
+
+    return {
+        'is_manshu_go': is_manshu_go,
+        'is_tier1': is_tier1_cond,
+        'is_tier2': is_tier2_cond,
+        'b1_drop': b1_drop,
+        'outer_ov': outer_ov,
+        'outer_boat': outer_boat,
+        'bets': bets_manshu,
+        'probs_dict': manshu_probs_dict,
+        'cum_prob': cum_prob,
+        'expected_roi': exp_roi,
+        'synthetic_odds': syn_odds
+    }
 
 
 # =====================================================================
@@ -1449,36 +1708,8 @@ def evaluate_race(
         'cluster_name': cluster_name
     }
 
-    # 1. 難水面（Cluster 1）即時除外ガード
-    if venue_code in CLUSTER_1_VENUES:
-        logger.info(f"🛑 [SKIP] {venue_name} (会場コード: {venue_code:02d}) は難水面 (Cluster 1) のためシステム保護によりスキップします。")
-        try:
-            db_manager.save_race_prediction(
-                race_id=race_id, race_date=date_str, venue_code=venue_code,
-                venue_name=venue_name, race_no=race_no, deadline_time=deadline_str,
-                top_boat=None, max_p1=None, prob_gap=None, gatekeeper_passed=False,
-                cluster_id=1, cluster_name="難水面・波乱場", status="skipped_cluster1",
-                source="auto"
-            )
-        except Exception: pass
-        
-        export_radar_state(
-            race_info=race_info,
-            ai_eval={
-                'p1_score': 0.0,
-                'top_boat': 1,
-                'gatekeeper_passed': False,
-                'motor_rate': 0.0,
-                'wave_height': 0.0,
-                'sniper_go': False,
-                'sniper_node': '',
-                'status': 'skipped_cluster1',
-                'status_message': f"🛑 難水面システム除外 ({venue_name}: Cluster 1)",
-                'total_bet': 0,
-                'bets_count': 0
-            }
-        )
-        return {'status': 'skipped_cluster1'}
+    # 1. 会場クラスタ判定 (Regime A/B の1号艇アタマは Cluster 1 を除外、Regime C の逆転スナイプおよび的中特化は全24会場対応)
+    is_cluster1_venue = (venue_code in CLUSTER_1_VENUES)
         
     # 2. 出走データ & 直前オッズスクレイピング
     df_race = BoatRaceScraper.get_race_data(date_str, venue_code, race_no)
@@ -1524,8 +1755,10 @@ def evaluate_race(
     else:
         p_norm_syn_dict = {b: 1.0 / len(active_boats) for b in active_boats}
         
-    df_feat['syn_win_rate'] = df_feat['boat_number'].map(p_norm_syn_dict).fillna(1.0 / len(active_boats))
-    df_feat['init_score'] = probs_to_init_scores(df_feat['syn_win_rate'].to_numpy())
+    # 学習時 (train_data_full.csv) と同一の未正規化オッズ逆数和を syn_win_rate に設定し、init_score には正規化確率を使用
+    df_feat['syn_win_rate'] = df_feat['boat_number'].map(syn_dict).fillna(0.0)
+    p_norm_syn_series = df_feat['boat_number'].map(p_norm_syn_dict).fillna(1.0 / len(active_boats))
+    df_feat['init_score'] = probs_to_init_scores(p_norm_syn_series.to_numpy())
     
     # 5. Gatekeeper 推論 (Honmei + Platt Scaling)
     if not os.path.exists(MODEL_HONMEI_PATH) or not os.path.exists(MODEL_RESIDUAL_PATH):
@@ -1550,23 +1783,7 @@ def evaluate_race(
     b1_motor_rate = float(b1_feat['motor_rate'].iloc[0]) if (len(b1_feat) > 0 and 'motor_rate' in b1_feat.columns and pd.notna(b1_feat['motor_rate'].iloc[0])) else 0.0
     wave_height = float(df_feat['wave_height'].iloc[0]) if ('wave_height' in df_feat.columns and pd.notna(df_feat['wave_height'].iloc[0])) else 0.0
 
-    gatekeeper_passed = (max_p1 >= gatekeeper_th)
-
-    # 5.5 Sniper Filter (決定木マイクロクラスタ: Node 8, 9, 10)
-    sniper_go = False
-    sniper_node = ""
-
-    if b1_motor_rate > 61.33:
-        sniper_go = True
-        sniper_node = "Node 10: 超抜モーター"
-    elif wave_height > 6.5:  # (b1_motor_rate <= 61.33)
-        sniper_go = True
-        sniper_node = "Node 9: 荒水面オッズ歪み"
-    elif b1_motor_rate > 30.09 and max_p1 > 0.81:  # (wave_height <= 6.5)
-        sniper_go = True
-        sniper_node = "Node 8: 主力鉄板"
-
-    # 6. Extractor 推論 (Residual) - 見送り時でもメモリ上で全件計算を実行
+    # 6. Extractor 推論 (Residual 1着 & 条件付き2・3着モデル)
     model_r = lgb.Booster(model_file=MODEL_RESIDUAL_PATH)
     df_r = prepare_features_for_model(df_feat, model_r)
     raw_res = model_r.predict(df_r, raw_score=True)
@@ -1574,57 +1791,154 @@ def evaluate_race(
     p_raw_res = 1.0 / (1.0 + np.exp(-np.clip(total_logits, -30, 30)))
     p_norm_res = p_raw_res / np.sum(p_raw_res)
     p1_dict_residual = dict(zip(df_feat['boat_number'], p_norm_res))
-    
-    # 7. 会場クラスタ別 Benter 確率展開
+
+    b1_p_res = float(p1_dict_residual.get(1, 0.0))
+    b1_p_mkt = float(p_norm_syn_dict.get(1, 0.0))
+
+    # 5.5 新戦略 Triple-Regime Gatekeeper & Sniper Filter (2026年OOT全4四半期黒字・ROI 159.79% / +469,300円)
+    is_regime_a = (not is_cluster1_venue) and (top_boat == 1 and max_p1 >= 0.80 and b1_p_res > b1_p_mkt)
+    is_regime_b = (not is_cluster1_venue) and (top_boat == 1 and b1_p_res >= 0.74 and b1_motor_rate >= 35.0)
+    regime_c_heads = tuple(
+        b for b in (2, 3, 4)
+        if float(p1_dict_residual.get(b, 0.0)) >= 0.35
+        and (float(p1_dict_residual.get(b, 0.0)) - float(p_norm_syn_dict.get(b, 0.0))) >= 0.11
+    )
+    is_regime_c = (len(regime_c_heads) > 0) and not (is_regime_a or is_regime_b)
+    gatekeeper_passed = ((not is_cluster1_venue) and (top_boat == 1) and ((max_p1 >= gatekeeper_th) or (b1_p_res >= 0.74))) or is_regime_c
+
+    sniper_go = False
+    sniper_node = ""
+    hybrid_alpha = 0.0
+    eff_d2, eff_d3 = (0.70, 0.80) if is_regime_c else (cluster_d2, cluster_d3)
+    if is_regime_a:
+        sniper_go = True
+        sniper_node = "Regime A: 1号艇・市場過小評価オーバーレイ (Hybrid 2nd/3rd)"
+        hybrid_alpha = 0.6
+    elif is_regime_b:
+        sniper_go = True
+        sniper_node = "Regime B: 1号艇・高信頼残差×好モーター (Benter)"
+        hybrid_alpha = 0.0
+    elif is_regime_c:
+        sniper_go = True
+        heads_str = ",".join(f"{b}号艇" for b in regime_c_heads)
+        sniper_node = f"Regime C: 逆転スナイプ [{heads_str}→1号艇2着残し] (Overlay>=11%)"
+        hybrid_alpha = 0.0
+
+    # 7. 会場クラスタ別 Benter 確率展開 & 条件付き2・3着ハイブリッド統合
     benter_probs, _, _ = calculate_benter_probs(
         p1_dict_residual,
-        d2=cluster_d2,
-        d3=cluster_d3,
+        d2=eff_d2,
+        d3=eff_d3,
         calibration_method='direct'
     )
     benter_probs_dict = {p['combo']: p['prob'] for p in benter_probs}
+
+    if hybrid_alpha > 0.0 and os.path.exists(MODEL_2ND_PATH) and os.path.exists(MODEL_3RD_PATH):
+        try:
+            model_2nd = lgb.Booster(model_file=MODEL_2ND_PATH)
+            model_3rd = lgb.Booster(model_file=MODEL_3RD_PATH)
+            sub_sum = float(df_feat.loc[df_feat['boat_number'] >= 2, 'syn_win_rate'].sum())
+            p_sub = np.where(sub_sum > 0, df_feat['syn_win_rate'].to_numpy() / max(sub_sum, 1e-9), 0.20)
+            init_sub = probs_to_init_scores(p_sub, clip_eps=1e-4)
+            init_23 = probs_to_init_scores(np.clip(p_sub * 2.0, 1e-4, 1.0 - 1e-4), clip_eps=1e-4)
+            df_2 = prepare_features_for_model(df_feat, model_2nd)
+            p_c2 = 1.0 / (1.0 + np.exp(-np.clip(model_2nd.predict(df_2, raw_score=True) + init_sub, -30, 30)))
+            p_c3 = 1.0 / (1.0 + np.exp(-np.clip(model_3rd.predict(df_2, raw_score=True) + init_23, -30, 30)))
+            boats_arr = df_feat['boat_number'].to_numpy(dtype=int)
+            cond2_d = {int(boats_arr[i]): max(float(p_c2[i]), 1e-9) for i in range(len(boats_arr))}
+            cond3_d = {int(boats_arr[i]): max(float(p_c3[i]), 1e-9) for i in range(len(boats_arr))}
+            for b1, b2, b3 in itertools.permutations(boats_arr, 3):
+                c_key = f"{int(b1)}-{int(b2)}-{int(b3)}"
+                prob2_c = cond2_d[int(b2)] / sum(cond2_d[int(b)] for b in boats_arr if b != b1)
+                prob3_c = cond3_d[int(b3)] / sum(cond3_d[int(b)] for b in boats_arr if b != b1 and b != b2)
+                p_cond = float(p1_dict_residual.get(int(b1), 0.0)) * prob2_c * prob3_c
+                benter_probs_dict[c_key] = (1.0 - hybrid_alpha) * benter_probs_dict.get(c_key, 0.0) + hybrid_alpha * p_cond
+        except Exception as e:
+            logger.warning(f"条件付き2・3着モデル統合フォールバック: {e}")
     
-    # 8. 的中特化（動的ダッチング）をメモリ上で計算
+    # 8. 的中特化（動的ダッチング）をメモリ上で計算 (新モデル＆条件付き2・3着モデル最適化版)
     bets_hit_focused = {}
     exp_roi_hit = 0.0
     syn_odds_hit = 0.0
     is_gogo_lamp = False
     is_chance_lamp = False
-    if benter_probs_dict and all_odds:
+    dutching_probs_dict = dict(benter_probs_dict)
+    if (not is_cluster1_venue) and p1_dict_residual and all_odds:
         try:
+            # 的中特化ダッチング用の確率展開: GOGO候補は (C0:0.50/0.75, C2:0.10/0.25)、CHANCE候補は条件付き2・3着ハイブリッド (d=0.50/0.75, alpha=0.6)
+            is_gogo_cand = (top_boat == 1) and (max_p1 is not None and max_p1 >= 0.65) and (b1_p_res > b1_p_mkt) and (b1_motor_rate >= 40.0)
+            d_hit2, d_hit3 = ((0.50, 0.75) if cluster_id == 0 else (0.10, 0.25)) if is_gogo_cand else (0.50, 0.75)
+            hit_benter_list, _, _ = calculate_benter_probs(p1_dict_residual, d2=d_hit2, d3=d_hit3, calibration_method='direct')
+            dutching_probs_dict = {p['combo']: p['prob'] for p in hit_benter_list}
+
+            if (not is_gogo_cand) and os.path.exists(MODEL_2ND_PATH) and os.path.exists(MODEL_3RD_PATH):
+                try:
+                    m2_h = lgb.Booster(model_file=MODEL_2ND_PATH)
+                    m3_h = lgb.Booster(model_file=MODEL_3RD_PATH)
+                    sub_s = float(df_feat.loc[df_feat['boat_number'] >= 2, 'syn_win_rate'].sum())
+                    p_s = np.where(sub_s > 0, df_feat['syn_win_rate'].to_numpy() / max(sub_s, 1e-9), 0.20)
+                    in_s2 = probs_to_init_scores(p_s, clip_eps=1e-4)
+                    in_s3 = probs_to_init_scores(np.clip(p_s * 2.0, 1e-4, 1.0 - 1e-4), clip_eps=1e-4)
+                    df_2h = prepare_features_for_model(df_feat, m2_h)
+                    pc2_h = 1.0 / (1.0 + np.exp(-np.clip(m2_h.predict(df_2h, raw_score=True) + in_s2, -30, 30)))
+                    pc3_h = 1.0 / (1.0 + np.exp(-np.clip(m3_h.predict(df_2h, raw_score=True) + in_s3, -30, 30)))
+                    b_arr = df_feat['boat_number'].to_numpy(dtype=int)
+                    c2_map = {int(b_arr[i]): max(float(pc2_h[i]), 1e-9) for i in range(len(b_arr))}
+                    c3_map = {int(b_arr[i]): max(float(pc3_h[i]), 1e-9) for i in range(len(b_arr))}
+                    for b1, b2, b3 in itertools.permutations(b_arr, 3):
+                        if int(b1) == 1:
+                            ck = f"{int(b1)}-{int(b2)}-{int(b3)}"
+                            pr2 = c2_map[int(b2)] / sum(c2_map[int(b)] for b in b_arr if b != b1)
+                            pr3 = c3_map[int(b3)] / sum(c3_map[int(b)] for b in b_arr if b != b1 and b != b2)
+                            p_c = float(p1_dict_residual.get(1, 0.0)) * pr2 * pr3
+                            dutching_probs_dict[ck] = 0.4 * dutching_probs_dict.get(ck, 0.0) + 0.6 * p_c
+                except Exception:
+                    pass
+
             bets_hit_focused = calculate_dutching_bets(
-                benter_probs=benter_probs_dict,
+                benter_probs=dutching_probs_dict,
                 odds_dict=all_odds,
                 budget=1000,
                 target_cum_prob=0.50,
                 max_combos=8,
                 min_combos=2,
-                min_synthetic_odds=None  # 目標合成オッズ制約を撤廃し完全な的中率特化へ
+                min_synthetic_odds=None
             )
             if bets_hit_focused:
                 tot_hit_b = sum(bets_hit_focused.values())
                 exp_pay = sum(
-                    benter_probs_dict.get(c, 0.0) * all_odds.get(c, 0.0) * amt
+                    dutching_probs_dict.get(c, 0.0) * all_odds.get(c, 0.0) * amt
                     for c, amt in bets_hit_focused.items()
                 )
                 exp_roi_hit = (exp_pay / tot_hit_b) if tot_hit_b > 0 else 0.0
                 inv_sum = sum(1.0 / all_odds.get(c, 1.0) for c in bets_hit_focused.keys() if all_odds.get(c, 0) > 0)
                 syn_odds_hit = 1.0 / inv_sum if inv_sum > 0 else 0.0
 
-                # 🎰 GOGO!ランプ点灯判定 (超激アツ / Tier 1): P1>=55% & モーター2連率>=40% & 合成期待回収率>=1.15
-                # 2026年実績: 的中率53.9% / 回収率110.6% (+37,975円)
-                if (max_p1 is not None and max_p1 >= 0.55) and (b1_motor_rate >= 40.0) and (exp_roi_hit >= 1.15):
+                # 🎰 GOGO!ランプ点灯判定 (新モデル対応): 1号艇本命 & P1>=65% & 残差オーバーレイ(Res>Mkt) & モーター>=40% & 期待回収率>=1.10
+                # 2026年OOT実績: 170R / 91的中 (的中率53.5%) / 回収率104.2% (+8,701円)
+                if is_gogo_cand and (exp_roi_hit >= 1.10):
                     is_gogo_lamp = True
-                # ⭐ CHANCEランプ点灯判定 (チャンス / Tier 2): P1>=55% & モーター2連率>=36% & 合成オッズ>=2.0 & 期待回収率>=1.05
-                # 2026年実績: 的中率39.6% / 回収率101.3% (GOGO含む全体では回収率101.9%)
-                elif (max_p1 is not None and max_p1 >= 0.55) and (b1_motor_rate >= 36.0) and (syn_odds_hit >= 2.0) and (exp_roi_hit >= 1.05):
+                # ⭐ CHANCEランプ点灯判定 (新モデル＋2・3着モデル対応): 1号艇本命 & P1>=60% & モーター>=36% & 合成オッズ>=2.0 & 期待回収率>=1.05
+                # 2026年OOT実績: 198R / 86的中 (的中率43.4%) / 回収率105.5% (+11,568円)
+                elif (top_boat == 1) and (max_p1 is not None and max_p1 >= 0.60) and (b1_motor_rate >= 36.0) and (syn_odds_hit >= 2.0) and (exp_roi_hit >= 1.05):
                     is_chance_lamp = True
         except Exception: pass
 
-    # 9. ポートフォリオ最適化 (SLSQP / 黄金ベースライン)
+    # 9. ポートフォリオ最適化 (Regime A/B: 1-2/3/4-x, Regime C: 2/3/4-1-x スジ舟券フィルタ適用)
+    if is_regime_c:
+        allowed_h_strs = {str(b) for b in regime_c_heads}
+        sniper_probs_dict = {
+            c: (p if len(c.split('-')) == 3 and c.split('-')[0] in allowed_h_strs and c.split('-')[1] == '1' else 0.0)
+            for c, p in benter_probs_dict.items()
+        }
+    else:
+        sniper_probs_dict = {
+            c: (p if len(c.split('-')) == 3 and c.split('-')[0] == '1' and c.split('-')[1] in ('2', '3', '4') else 0.0)
+            for c, p in benter_probs_dict.items()
+        }
     optimizer = PortfolioOptimizer()
     bets = optimizer.optimize_funds(
-        probabilities=benter_probs_dict,
+        probabilities=sniper_probs_dict,
         odds=all_odds,
         bankroll=float(bankroll),
         risk_aversion=float(risk_aversion),
@@ -1718,6 +2032,72 @@ def evaluate_race(
         except Exception as e:
             logger.warning(f"的中特化データの保存エラー: {e}")
 
+    # 11.8 【万舟スナイパー (💣 万舟スナイパー)】算出・DB保存・Discord通知
+    try:
+        manshu_res = calculate_manshu_sniper_bets(
+            p1_dict_residual=p1_dict_residual,
+            p_norm_syn_dict=p_norm_syn_dict,
+            all_odds=all_odds,
+            d2=0.60,
+            d3=0.80,
+            min_odds=100.0,
+            max_odds=500.0,
+            min_ev=1.20,
+            max_combos=8
+        )
+        is_manshu_go = manshu_res['is_manshu_go']
+        manshu_status = "manshu_go" if is_manshu_go else "manshu_skipped"
+        db_manager.save_manshu_prediction(
+            race_id=race_id,
+            race_date=date_str,
+            venue_code=venue_code,
+            venue_name=venue_name,
+            race_no=race_no,
+            deadline_time=deadline_str,
+            top_boat=manshu_res['outer_boat'] if is_manshu_go else top_boat,
+            max_p1=max_p1,
+            prob_gap=prob_gap,
+            cluster_id=cluster_id,
+            cluster_name=cluster_name,
+            status=manshu_status,
+            bets=manshu_res['bets'],
+            benter_probs=manshu_res['probs_dict'],
+            all_odds=all_odds,
+            target_cum_prob=manshu_res['cum_prob'],
+            is_gogo_lamp=manshu_res['is_tier1'],
+            is_chance_lamp=manshu_res['is_tier2'],
+            expected_roi=manshu_res['expected_roi'],
+            motor_rate=b1_motor_rate,
+            synthetic_odds=manshu_res['synthetic_odds'],
+            b1_drop=manshu_res['b1_drop'],
+            outer_ov=manshu_res['outer_ov']
+        )
+        if is_manshu_go:
+            tier_label = "🔥【激熱万舟 Tier1 (回収率443.5%)】" if manshu_res['is_tier1'] else "💣【万舟好機 Tier2 (回収率243.2%)】"
+            logger.info(
+                f"💣 [{venue_name} {race_no}R] 万舟スナイパー発動！ {tier_label} "
+                f"(1号艇過信:{manshu_res['b1_drop']:+.1%}, {manshu_res['outer_boat']}号艇穴:{manshu_res['outer_ov']:+.1%}, "
+                f"{len(manshu_res['bets'])}点 / {sum(manshu_res['bets'].values()):,}円)"
+            )
+            send_manshu_discord_notification(
+                webhook_url=webhook_url,
+                date_str=date_str,
+                venue_code=venue_code,
+                venue_name=venue_name,
+                race_no=race_no,
+                deadline_str=deadline_str,
+                is_tier1=manshu_res['is_tier1'],
+                b1_drop=manshu_res['b1_drop'],
+                outer_ov=manshu_res['outer_ov'],
+                outer_boat=manshu_res['outer_boat'],
+                bets=manshu_res['bets'],
+                manshu_probs=manshu_res['probs_dict'],
+                all_odds=all_odds,
+                dry_run=dry_run
+            )
+    except Exception as e:
+        logger.warning(f"万舟スナイパーデータの保存・通知エラー: {e}")
+
     # 12. Supabase DB保存 & Discord通知 (黄金ベースライン)
     # 本番用の race_predictions テーブルへ全評価レースの推論結果・判定ステータスを保存（INSERT/UPSERT）
     try:
@@ -1784,8 +2164,9 @@ def settle_race_results(
             
     unresolved_main = db_manager.get_unresolved_predictions(date_str=target_date, source=source) if hasattr(db_manager, 'get_unresolved_predictions') else []
     unresolved_hit = db_manager.get_unresolved_hit_focused_predictions(date_str=target_date) if hasattr(db_manager, 'get_unresolved_hit_focused_predictions') else []
+    unresolved_manshu = db_manager.get_unresolved_manshu_predictions(date_str=target_date) if hasattr(db_manager, 'get_unresolved_manshu_predictions') else []
     
-    if not unresolved_main and not unresolved_hit:
+    if not unresolved_main and not unresolved_hit and not unresolved_manshu:
         return []
 
     # レース結果キャッシュ (同一レースの重複スクレイピング防止)
@@ -1969,6 +2350,90 @@ def settle_race_results(
                 'payout': actual_payout,
                 'profit': profit
             })
+
+    # 3. 万舟スナイパー (manshu_predictions) の精算
+    if unresolved_manshu:
+        logger.info(f"🔍 [SETTLEMENT: MANSHU-SNIPER] {len(unresolved_manshu)} 件の未確定万舟スナイパーレースの結果確認を開始します...")
+        for r in unresolved_manshu:
+            race_id = r['race_id']
+            date_str = r['race_date']
+            venue_code = r['venue_code']
+            venue_name = r['venue_name']
+            race_no = r['race_no']
+
+            if "_MOCK" in race_id:
+                continue
+
+            res = fetch_result(date_str, venue_code, race_no)
+            if not res:
+                continue
+
+            combo = res['combo']
+            payout_per_100 = res['payout_per_100']
+
+            detail = db_manager.get_manshu_race_detail(race_id)
+            bets = detail.get('bets', []) if detail else []
+
+            if not bets:
+                db_manager.update_manshu_result(
+                    race_id=race_id,
+                    actual_result=combo,
+                    payout=0,
+                    profit=0,
+                    hit_status="no_bet"
+                )
+                settled_results.append({
+                    'race_id': race_id,
+                    'venue_name': venue_name,
+                    'race_no': race_no,
+                    'mode': 'manshu_sniper',
+                    'actual_result': combo,
+                    'hit_status': 'no_bet',
+                    'payout': 0,
+                    'profit': 0
+                })
+                continue
+
+            total_bet = sum(b['bet_amount'] for b in bets)
+            is_cancelled = res.get('is_cancelled', False) or combo == '不成立'
+
+            if is_cancelled:
+                actual_payout = total_bet
+                profit = 0
+                hit_status = "refund"
+                logger.info(f"🔄 [万舟スナイパー 返還] {venue_name} {race_no}R: 結果 {combo} | 投資: {total_bet:,}円 -> 全額返還 (収支: 0円)")
+            else:
+                hit_bet = next((b for b in bets if b['combination'] == combo), None)
+                if hit_bet:
+                    bet_amt = hit_bet['bet_amount']
+                    actual_payout = int((bet_amt / 100.0) * payout_per_100)
+                    profit = actual_payout - total_bet
+                    hit_status = "hit"
+                    logger.info(f"🎆🎆🎆 [💣万舟スナイパー 炸裂的中!!] {venue_name} {race_no}R: 結果 {combo} | 投資: {total_bet:,}円 -> 払戻: {actual_payout:,}円 (純利益: {profit:+,}円)")
+                else:
+                    actual_payout = 0
+                    profit = - total_bet
+                    hit_status = "miss"
+                    logger.info(f"💨 [万舟スナイパー 不的中] {venue_name} {race_no}R: 結果 {combo} | 投資: {total_bet:,}円 -> 払戻: 0円 (損失: {profit:,}円)")
+
+            db_manager.update_manshu_result(
+                race_id=race_id,
+                actual_result=combo,
+                payout=actual_payout,
+                profit=profit,
+                hit_status=hit_status
+            )
+
+            settled_results.append({
+                'race_id': race_id,
+                'venue_name': venue_name,
+                'race_no': race_no,
+                'mode': 'manshu_sniper',
+                'actual_result': combo,
+                'hit_status': hit_status,
+                'payout': actual_payout,
+                'profit': profit
+            })
             
     if settled_results:
         logger.info(f"🏁 [SETTLEMENT] {len(settled_results)} 件の確定収支をデータベースに反映しました。")
@@ -2024,8 +2489,10 @@ def evaluate_mock_race(
             'wave_height': 1.0,
             'prior_results': '1 1 1 1' if bn == 1 else '3 4 2 5',
             'branch': '山口' if bn == 1 else '福岡',
+            'racer_rank': 'A1' if bn == 1 else ('A2' if bn in (2, 3) else 'B1'),
             'weight': 52.0,
             'nat_win_rate': nat_win_rates[i],
+            'nat_quinella_rate': 58.5 if bn == 1 else 36.0,
             'local_win_rate': local_win_rates[i]
         })
     df_race = pd.DataFrame(rows)
@@ -2063,9 +2530,12 @@ def evaluate_mock_race(
         except Exception: pass
         
     total_syn = sum(syn_dict.values())
-    p_norm_syn_dict = {b: syn_dict[b] / total_syn for b in active_boats}
-    df_feat['syn_win_rate'] = df_feat['boat_number'].map(p_norm_syn_dict).fillna(1.0 / 6.0)
-    df_feat['init_score'] = probs_to_init_scores(df_feat['syn_win_rate'].to_numpy())
+    p_norm_syn_dict = {b: syn_dict[b] / total_syn for b in active_boats} if total_syn > 0 else {b: 1.0 / 6.0 for b in active_boats}
+    # model_honmei は学習データと同様に未正規化の逆数和 (Σ(1/odds)) を syn_win_rate として参照
+    df_feat['syn_win_rate'] = df_feat['boat_number'].map(syn_dict).fillna(0.0)
+    # model_residual のベースライン init_score には正規化後の市場勝率を使用
+    p_norm_syn_series = df_feat['boat_number'].map(p_norm_syn_dict).fillna(1.0 / 6.0)
+    df_feat['init_score'] = probs_to_init_scores(p_norm_syn_series.to_numpy())
     
     # Gatekeeper 推論
     model_h = lgb.Booster(model_file=MODEL_HONMEI_PATH)
@@ -2096,21 +2566,6 @@ def evaluate_mock_race(
         'cluster_name': cluster_name
     }
 
-    gatekeeper_passed = (max_p1 >= gatekeeper_th)
-
-    # Sniper Filter
-    sniper_go = False
-    sniper_node = ""
-    if b1_motor_rate > 61.33:
-        sniper_go = True
-        sniper_node = "Node 10: 超抜モーター"
-    elif wave_height > 6.5:
-        sniper_go = True
-        sniper_node = "Node 9: 荒水面オッズ歪み"
-    elif b1_motor_rate > 30.09 and max_p1 > 0.81:
-        sniper_go = True
-        sniper_node = "Node 8: 主力鉄板"
-
     # Extractor 推論 (見送り時でもインメモリで全件計算)
     model_r = lgb.Booster(model_file=MODEL_RESIDUAL_PATH)
     df_r = prepare_features_for_model(df_feat, model_r)
@@ -2119,6 +2574,32 @@ def evaluate_mock_race(
     p_raw_res = 1.0 / (1.0 + np.exp(-np.clip(total_logits, -30, 30)))
     p_norm_res = p_raw_res / np.sum(p_raw_res)
     p1_dict_residual = dict(zip(df_feat['boat_number'], p_norm_res))
+
+    b1_p_res = float(p1_dict_residual.get(1, 0.0))
+    b1_p_mkt = float(p_norm_syn_dict.get(1, 0.0))
+    is_cluster1_venue = (venue_code in CLUSTER_1_VENUES)
+    is_regime_a = (not is_cluster1_venue) and (top_boat == 1 and max_p1 >= 0.80 and b1_p_res > b1_p_mkt)
+    is_regime_b = (not is_cluster1_venue) and (top_boat == 1 and b1_p_res >= 0.74 and b1_motor_rate >= 35.0)
+    regime_c_heads = tuple(
+        b for b in (2, 3, 4)
+        if float(p1_dict_residual.get(b, 0.0)) >= 0.35
+        and (float(p1_dict_residual.get(b, 0.0)) - float(p_norm_syn_dict.get(b, 0.0))) >= 0.11
+    )
+    is_regime_c = (len(regime_c_heads) > 0) and not (is_regime_a or is_regime_b)
+    gatekeeper_passed = ((not is_cluster1_venue) and (top_boat == 1) and ((max_p1 >= gatekeeper_th) or (b1_p_res >= 0.74))) or is_regime_c
+
+    sniper_go = False
+    sniper_node = ""
+    if is_regime_a:
+        sniper_go = True
+        sniper_node = "Regime A: 1号艇・市場過小評価オーバーレイ (Hybrid 2nd/3rd)"
+    elif is_regime_b:
+        sniper_go = True
+        sniper_node = "Regime B: 1号艇・高信頼残差×好モーター (Benter)"
+    elif is_regime_c:
+        sniper_go = True
+        heads_str = ",".join(f"{b}号艇" for b in regime_c_heads)
+        sniper_node = f"Regime C: 逆転スナイプ [{heads_str}→1号艇2着残し] (Overlay>=11%)" 
     
     # Benter 展開
     benter_probs, _, _ = calculate_benter_probs(
@@ -2164,10 +2645,14 @@ def evaluate_mock_race(
                     is_chance_lamp = True
         except Exception: pass
 
-    # 最適化 (黄金ベースライン)
+    # 最適化 (黄金ベースライン: 2着5・6号艇除外フィルタ適用)
+    sniper_probs_dict = {
+        c: (p if len(c.split('-')) == 3 and c.split('-')[1] not in ('5', '6') else 0.0)
+        for c, p in benter_probs_dict.items()
+    }
     optimizer = PortfolioOptimizer()
     bets = optimizer.optimize_funds(
-        probabilities=benter_probs_dict,
+        probabilities=sniper_probs_dict,
         odds=all_odds,
         bankroll=float(bankroll),
         risk_aversion=float(risk_aversion),
@@ -2257,6 +2742,48 @@ def evaluate_mock_race(
             logger.info(f"💾 [MOCK] 的中特化データを hit_focused_predictions に自動蓄積保存しました ({len(bets_hit_focused)}点 / {sum(bets_hit_focused.values()):,}円)")
         except Exception as e:
             logger.warning(f"MOCK的中特化データの保存エラー: {e}")
+
+    # MOCK 万舟スナイパーデータを保存
+    try:
+        manshu_res = calculate_manshu_sniper_bets(
+            p1_dict_residual=p1_dict_residual,
+            p_norm_syn_dict=p_norm_syn_dict,
+            all_odds=all_odds,
+            d2=0.60,
+            d3=0.80,
+            min_odds=100.0,
+            max_odds=500.0,
+            min_ev=1.20,
+            max_combos=8
+        )
+        manshu_status = "mock_manshu_go" if manshu_res['is_manshu_go'] else "mock_manshu_skipped"
+        db_manager.save_manshu_prediction(
+            race_id=race_id,
+            race_date=date_str,
+            venue_code=venue_code,
+            venue_name=v_name,
+            race_no=race_no,
+            deadline_time="15:25 (MOCK)",
+            top_boat=manshu_res['outer_boat'] if manshu_res['is_manshu_go'] else top_boat,
+            max_p1=max_p1,
+            prob_gap=prob_gap,
+            cluster_id=cluster_id,
+            cluster_name=cluster_name,
+            status=manshu_status,
+            bets=manshu_res['bets'],
+            benter_probs=manshu_res['probs_dict'],
+            all_odds=all_odds,
+            target_cum_prob=manshu_res['cum_prob'],
+            is_gogo_lamp=manshu_res['is_tier1'],
+            is_chance_lamp=manshu_res['is_tier2'],
+            expected_roi=manshu_res['expected_roi'],
+            motor_rate=b1_motor_rate,
+            synthetic_odds=manshu_res['synthetic_odds'],
+            b1_drop=manshu_res['b1_drop'],
+            outer_ov=manshu_res['outer_ov']
+        )
+    except Exception as e:
+        logger.warning(f"MOCK万舟スナイパーデータの保存エラー: {e}")
     
     # Supabase 保存 (推論結果・ステータス)
     mock_status = f"mock_{status}" if not status.startswith("mock_") else status
@@ -2339,11 +2866,12 @@ def register_daily_schedules(
     skipped_cluster1 = 0
     already_passed = 0
     
-    target_venues = [(vcode, vname) for vcode, vname in venues if vcode not in CLUSTER_1_VENUES]
-    skipped_cluster1 = len(venues) - len(target_venues)
+    # Regime C (逆転スナイプ) および 万舟スナイパー は全24会場対応のため全開催場をスケジュール登録
+    # (Regime A/B および 的中特化 GOGO/CHANCE は evaluate_race 内で Cluster 1 を自動除外)
+    target_venues = list(venues)
     for vcode, vname in venues:
         if vcode in CLUSTER_1_VENUES:
-            logger.info(f"  ・[{vcode:02d}] {vname:<4}: 【難水面 (Cluster 1) 除外】 登録スキップ")
+            logger.info(f"  ・[{vcode:02d}] {vname:<4}: 【Cluster 1 (難水面)】 Regime C / 万舟スナイパー監視対象として登録")
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
     venue_deadlines = {}

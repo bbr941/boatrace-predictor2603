@@ -150,8 +150,15 @@ export const TimelineFeed: React.FC<TimelineFeedProps> = ({ races, mode, onSelec
           </div>
           {[
             { id: 'all', label: 'すべて' },
-            { id: 'gogo', label: '🎰 GOGO! (回収110%)', activeClass: 'bg-pink-600 text-white font-bold shadow-sm' },
-            { id: 'chance', label: '⭐ CHANCE以上 (回収100%超)', activeClass: 'bg-amber-500 text-slate-950 font-black shadow-sm' },
+            ...(mode === 'manshu_sniper'
+              ? [
+                  { id: 'gogo', label: '🔥 激熱万舟 (回収443%)', activeClass: 'bg-rose-600 text-white font-bold shadow-sm' },
+                  { id: 'chance', label: '💣 万舟好機以上 (回収243%)', activeClass: 'bg-amber-500 text-slate-950 font-black shadow-sm' },
+                ]
+              : [
+                  { id: 'gogo', label: '🎰 GOGO! (回収110%)', activeClass: 'bg-pink-600 text-white font-bold shadow-sm' },
+                  { id: 'chance', label: '⭐ CHANCE以上 (回収100%超)', activeClass: 'bg-amber-500 text-slate-950 font-black shadow-sm' },
+                ]),
             { id: 'invested', label: '🎯 参戦レース' },
             { id: 'unresolved', label: '⏳ 未確定' },
             { id: 'hit', label: '💮 的中のみ' },
@@ -258,18 +265,22 @@ export const TimelineFeed: React.FC<TimelineFeedProps> = ({ races, mode, onSelec
                 {/* Right: GOGO / CHANCE Badge / Hit Result Badge */}
                 <div className="flex items-center space-x-2">
                   {isGogo ? (
-                    <span className="px-2.5 py-1 rounded-full text-[11px] font-black italic bg-gradient-to-r from-pink-600 to-purple-600 text-white border border-pink-400/60 shadow-[0_0_10px_rgba(236,72,153,0.7)] animate-pulse flex items-center gap-1">
-                      <span>🎰 GOGO!</span>
+                    <span className={`px-2.5 py-1 rounded-full text-[11px] font-black italic text-white border shadow-[0_0_10px_rgba(236,72,153,0.7)] animate-pulse flex items-center gap-1 ${
+                      mode === 'manshu_sniper'
+                        ? 'bg-gradient-to-r from-rose-600 to-orange-600 border-rose-400/60'
+                        : 'bg-gradient-to-r from-pink-600 to-purple-600 border-pink-400/60'
+                    }`}>
+                      <span>{mode === 'manshu_sniper' ? '🔥 激熱万舟!' : '🎰 GOGO!'}</span>
                       <span className="not-italic text-[10px] text-amber-200 font-bold hidden sm:inline">
-                        超激アツ (回収110%)
+                        {mode === 'manshu_sniper' ? 'Tier1 (回収443%)' : '超激アツ (回収110%)'}
                       </span>
                     </span>
                   ) : isChance ? (
                     <span className="px-2.5 py-1 rounded-full text-[11px] font-black italic bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 border border-amber-300 shadow-[0_0_10px_rgba(245,158,11,0.6)] animate-pulse flex items-center gap-1">
                       <Star className="w-3 h-3 fill-slate-950 text-slate-950" />
-                      <span>CHANCE</span>
+                      <span>{mode === 'manshu_sniper' ? '💣 万舟好機' : 'CHANCE'}</span>
                       <span className="not-italic text-[10px] text-slate-950 font-bold hidden sm:inline">
-                        好機 (回収101%)
+                        {mode === 'manshu_sniper' ? 'Tier2 (回収243%)' : '好機 (回収101%)'}
                       </span>
                     </span>
                   ) : null}
@@ -319,7 +330,17 @@ export const TimelineFeed: React.FC<TimelineFeedProps> = ({ races, mode, onSelec
 
               {/* Subheader Metrics Bar */}
               <div className="px-3 sm:px-4 py-1.5 bg-slate-950/30 border-b border-white/5 flex flex-wrap items-center justify-between text-[11px] text-slate-400 gap-2">
-                <div className="flex items-center space-x-3 font-mono">
+                <div className="flex items-center flex-wrap gap-3 font-mono">
+                  {mode === 'manshu_sniper' && (race as HitFocusedPrediction).b1_drop !== undefined && (race as HitFocusedPrediction).b1_drop !== null ? (
+                    <>
+                      <span>
+                        1号艇市場過信度: <strong className={((race as HitFocusedPrediction).b1_drop || 0) >= 0.06 ? 'text-rose-400' : ((race as HitFocusedPrediction).b1_drop || 0) >= 0.05 ? 'text-amber-300' : 'text-slate-200'}>{(((race as HitFocusedPrediction).b1_drop || 0) * 100).toFixed(1)}%</strong>
+                      </span>
+                      <span>
+                        外枠穴オーバーレイ: <strong className={((race as HitFocusedPrediction).outer_ov || 0) >= 0.05 ? 'text-rose-400' : ((race as HitFocusedPrediction).outer_ov || 0) >= 0.04 ? 'text-amber-300' : 'text-slate-200'}>{(((race as HitFocusedPrediction).outer_ov || 0) * 100).toFixed(1)}%</strong>
+                      </span>
+                    </>
+                  ) : null}
                   {p1 && (
                     <span>
                       本命信頼度(P1): <strong className="text-slate-200">{p1}%</strong>

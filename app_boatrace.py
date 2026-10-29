@@ -115,6 +115,8 @@ st.markdown("""
 
 MODEL_HONMEI_PATH = 'model_honmei.txt'
 MODEL_RESIDUAL_PATH = 'model_residual.txt'
+MODEL_2ND_PATH = 'model_2nd.txt'
+MODEL_3RD_PATH = 'model_3rd.txt'
 MODEL_ANA_PATH = 'model_ana.txt'
 DATA_DIR = 'app_data'
 HEADERS = {
@@ -394,6 +396,7 @@ class BoatRaceScraper:
 
                 branch = 'Unknown'
                 weight = 52.0
+                racer_rank = 'B1'
                 try:
                     td2 = tb.select("td")[2]
                     txt_full = td2.get_text(" ", strip=True)
@@ -402,20 +405,27 @@ class BoatRaceScraper:
                     prefectures = r"(群馬|埼玉|東京|福井|静岡|愛知|三重|滋賀|大阪|兵庫|徳島|香川|岡山|広島|山口|福岡|佐賀|長崎)"
                     m = re.search(prefectures, txt_full)
                     if m: branch = m.group(1)
+                    m_rank = re.search(r'\b(A1|A2|B1|B2)\b', txt_full)
+                    if m_rank: racer_rank = m_rank.group(1)
                 except Exception: pass
 
                 nat_win_rate = 0.0
+                nat_quinella_rate = 0.0
                 local_win_rate = 0.0
                 try:
-                    col3_txt = tb.select("td")[3].get_text(" ", strip=True)
-                    clean_txt = re.sub(r'[FLK]\d+', '', col3_txt) 
-                    nums = re.findall(r'(\d+(?:\.\d+)?)', clean_txt)
-                    if len(nums) >= 5:
-                        nat_win_rate = float(nums[1])
-                        local_win_rate = float(nums[3])
-                    elif len(nums) >= 4:
-                        nat_win_rate = float(nums[0])
-                        local_win_rate = float(nums[2])
+                    tds_list = tb.select("td")
+                    if len(tds_list) > 4:
+                        col4_txt = tds_list[4].get_text(" ", strip=True)
+                        nums_nat = re.findall(r'(\d+\.\d+)', col4_txt)
+                        if len(nums_nat) >= 1:
+                            nat_win_rate = float(nums_nat[0])
+                        if len(nums_nat) >= 2:
+                            nat_quinella_rate = float(nums_nat[1])
+                    if len(tds_list) > 5:
+                        col5_txt = tds_list[5].get_text(" ", strip=True)
+                        nums_loc = re.findall(r'(\d+\.\d+)', col5_txt)
+                        if len(nums_loc) >= 1:
+                            local_win_rate = float(nums_loc[0])
                 except Exception: pass
 
                 prior_results = ""
@@ -465,8 +475,10 @@ class BoatRaceScraper:
                     'wave_height': weather['wave_height'],
                     'prior_results': prior_results,
                     'branch': branch,
+                    'racer_rank': racer_rank,
                     'weight': weight,
                     'nat_win_rate': nat_win_rate,
+                    'nat_quinella_rate': nat_quinella_rate,
                     'local_win_rate': local_win_rate
                 }
 
@@ -492,11 +504,12 @@ def add_advanced_features(df):
         
     if 'race_id' not in df.columns:
         df['race_id'] = 'single_race'
-    df = df.sort_values(['race_id', 'boat_number'])
+    sort_col = 'pred_course' if 'pred_course' in df.columns else 'boat_number'
+    df = df.sort_values(['race_id', sort_col])
 
-    prev_sts = df['corrected_st'].shift(1)
-    df['inner_st_gap_corrected'] = df['corrected_st'] - prev_sts
-    df.loc[df['boat_number'] == 1, 'inner_st_gap_corrected'] = 0.0
+    prev_sts = df.groupby('race_id')['corrected_st'].shift(1)
+    df['inner_st_gap_corrected'] = (df['corrected_st'] - prev_sts).fillna(0.0)
+    df.loc[df[sort_col] == 1, 'inner_st_gap_corrected'] = 0.0
     
     if 'motor_rate' in df.columns and 'exhibition_time' in df.columns:
         df['motor_rank'] = df.groupby('race_id')['motor_rate'].rank(ascending=False, method='min')
@@ -505,7 +518,11 @@ def add_advanced_features(df):
     else:
         df['motor_gap'] = 0.0
         
-    if 'venue_course_1st_rate' in df.columns and 'nat_win_rate' in df.columns:
+    if 'course_quinella_rate' in df.columns and 'nat_quinella_rate' in df.columns:
+        df['specialist_score'] = (df['course_quinella_rate'] - df['nat_quinella_rate']).fillna(0.0)
+    elif 'course_1st_rate' in df.columns and 'nat_win_rate' in df.columns:
+        df['specialist_score'] = df['course_1st_rate'] - df['nat_win_rate']
+    elif 'venue_course_1st_rate' in df.columns and 'nat_win_rate' in df.columns:
         df['specialist_score'] = df['venue_course_1st_rate'] - df['nat_win_rate']
     else:
         df['specialist_score'] = 0.0
@@ -515,19 +532,20 @@ def add_advanced_features(df):
         df['my_sashi_rate'] = df['sashi_count'] / (df['course_run_count'] + 1.0)
         df['my_makuri_rate'] = df['makuri_count'] / (df['course_run_count'] + 1.0)
         
-        inner_nige_rate = df['my_nige_rate'].shift(1)
-        df['sashi_potential'] = df['my_sashi_rate'] / (inner_nige_rate + 0.01)
-        df.loc[df['boat_number'] == 1, 'sashi_potential'] = 0
+        c1_nige_rate = df.groupby('race_id')['my_nige_rate'].transform('first')
+        df['sashi_potential'] = (df['my_sashi_rate'] * (1.0 - c1_nige_rate)).fillna(0.0)
+        df.loc[df[sort_col] == 1, 'sashi_potential'] = 0.0
         
         df['st_rank'] = df.groupby('race_id')['corrected_st'].rank(ascending=True)
-        inner_st_rank = df['st_rank'].shift(1)
-        df['makuri_potential'] = df['my_makuri_rate'] * inner_st_rank
-        df.loc[df['boat_number'] == 1, 'makuri_potential'] = 0
+        inner_st_rank = df.groupby('race_id')['st_rank'].shift(1).fillna(3.5)
+        df['makuri_potential'] = (df['my_makuri_rate'] * inner_st_rank).fillna(0.0)
+        df.loc[df[sort_col] == 1, 'makuri_potential'] = 0.0
     else:
         df['sashi_potential'] = 0.0
         df['makuri_potential'] = 0.0
+    df = df.sort_values(['race_id', 'boat_number'])
         
-    bias_path = 'app_data/venue_frame_bias.csv'
+    bias_path = os.path.join(DATA_DIR, 'venue_frame_bias.csv')
     if os.path.exists(bias_path):
         try:
             bias_df = pd.read_csv(bias_path)
@@ -550,6 +568,22 @@ def add_advanced_features(df):
             df['venue_frame_win_rate'] = 0.16
     else:
         df['venue_frame_win_rate'] = 0.16
+
+    # 階級・実力補正特徴量 (train_model.py 準拠)
+    rank_map = {'A1': 4, 'A2': 3, 'B1': 2, 'B2': 1}
+    if 'racer_rank' in df.columns:
+        df['racer_rank_num'] = df['racer_rank'].astype(str).str.strip().map(rank_map).fillna(2).astype(int)
+    elif 'racer_rank_num' not in df.columns:
+        df['racer_rank_num'] = 2
+    df['rank_numeric'] = df['racer_rank_num']
+    rank_mean_lookup = {4: 6.6695, 3: 5.7890, 2: 4.5525, 1: 2.6491}
+    if 'nat_win_rate' in df.columns:
+        df['level_adjusted_win_rate'] = df['nat_win_rate'] * df['rank_numeric']
+        expected_rank_mean = df['rank_numeric'].map(rank_mean_lookup).fillna(4.5525)
+        df['rank_skill_gap'] = (df['nat_win_rate'] - expected_rank_mean).fillna(0.0)
+    else:
+        df['level_adjusted_win_rate'] = 0.0
+        df['rank_skill_gap'] = 0.0
         
     return df
 
@@ -721,23 +755,35 @@ class FeatureEngineer:
             elif 'WinRate' in df.columns:
                  df['local_win_rate'] = df['WinRate']
 
-            df = df.merge(v_course, left_on=['venue_name', 'pred_course'], right_on=['venue_name', 'course_number'], how='left')
+            v_course_clean = v_course.drop(columns=['venue_code'], errors='ignore')
+            df = df.merge(v_course_clean, left_on=['venue_name', 'pred_course'], right_on=['venue_name', 'course_number'], how='left')
+            df['venue_code_y'] = df['venue_code_int'].astype(str).str.zfill(2)
             df.rename(columns={'rate_1st': 'venue_course_1st_rate', 'rate_2nd': 'venue_course_2nd_rate', 'rate_3rd': 'venue_course_3rd_rate'}, inplace=True)
-            df = df.merge(r_params, on='racer_id', how='left')
+            
+            # r_params からは st_std_dev (および nat_win_rate 未取得時のフォールバック) のみを結合し、
+            # コース別決まり手 (nige_count 等) や nat_win_rate の _x/_y 衝突を防止する
+            if 'st_std_dev' in r_params.columns:
+                df = df.merge(r_params[['racer_id', 'st_std_dev']].drop_duplicates(subset=['racer_id']), on='racer_id', how='left')
+            if 'nat_win_rate' in r_params.columns:
+                r_nat_map = dict(zip(r_params['racer_id'], r_params['nat_win_rate']))
+                if 'nat_win_rate' not in df.columns:
+                    df['nat_win_rate'] = df['racer_id'].map(r_nat_map).fillna(0.0)
+                else:
+                    df['nat_win_rate'] = df['nat_win_rate'].replace(0.0, np.nan).fillna(df['racer_id'].map(r_nat_map)).fillna(0.0)
         except Exception: pass
         
-        required_cols = ['makuri_count', 'nige_count', 'sashi_count', 'makurizashi_count', 'nat_win_rate', 'course_run_count', 'local_win_rate']
+        required_cols = ['makuri_count', 'nige_count', 'sashi_count', 'makurizashi_count', 'nat_win_rate', 'nat_quinella_rate', 'course_run_count', 'local_win_rate', 'st_std_dev']
         for c in required_cols:
             if c not in df.columns: df[c] = 0.0
+            else: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0.0)
             
         def parse_prior(x):
-            if isinstance(x, (int, float)): return float(x)
+            if isinstance(x, (int, float)) and not np.isnan(x):
+                x = str(int(x))
             if not isinstance(x, str): return 3.5
             try:
-                x_c = re.sub(r'[欠失FLS]', '', x)
-                parts = x_c.split()
-                ranks = [float(p) for p in parts if p.isdigit()]
-                if ranks: return sum(ranks)/len(ranks)
+                ranks = [float(c) for c in x if c in '123456']
+                if ranks: return sum(ranks) / len(ranks)
             except Exception: pass
             return 3.5
             
@@ -751,7 +797,6 @@ class FeatureEngineer:
         # Advanced Features
         df = add_advanced_features(df)
         df = df.sort_values('pred_course')
-        st_col = 'corrected_st' if 'corrected_st' in df.columns else 'exhibition_start_timing'
         
         # 直前情報未発表時の安全なデフォルト補完
         if 'exhibition_time' not in df.columns or df['exhibition_time'].isna().all() or (df['exhibition_time'] == 0).all():
@@ -760,16 +805,13 @@ class FeatureEngineer:
             df['exhibition_time'] = pd.to_numeric(df['exhibition_time'], errors='coerce').fillna(6.80)
             df['exhibition_time'] = df['exhibition_time'].replace(0.0, 6.80)
             
-        if st_col not in df.columns or df[st_col].isna().all() or (df[st_col] == 0).all():
-            df[st_col] = 0.15
-        else:
-            df[st_col] = pd.to_numeric(df[st_col], errors='coerce').fillna(0.15)
-        
-        df['inner_st'] = df[st_col].shift(1).fillna(0.15)
-        df['inner_st_gap'] = df[st_col] - df['inner_st']
-        df['outer_st'] = df[st_col].shift(-1).fillna(0.15)
-        avg_neighbor = (df['inner_st'] + df['outer_st']) / 2
-        df['slit_formation'] = df[st_col] - avg_neighbor
+        # 学習時 (make_data_set.py) と完全一致: inner_st_gap と slit_formation は exhibition_start_timing から算出
+        ex_st_s = pd.to_numeric(df['exhibition_start_timing'], errors='coerce').fillna(0.15) if 'exhibition_start_timing' in df.columns else pd.Series(0.15, index=df.index)
+        inner_st_s = ex_st_s.shift(1)
+        df['inner_st_gap'] = (ex_st_s - inner_st_s).fillna(0.0)
+        outer_st_s = ex_st_s.shift(-1)
+        avg_neighbor = (inner_st_s.fillna(ex_st_s) + outer_st_s.fillna(ex_st_s)) / 2.0
+        df['slit_formation'] = (ex_st_s - avg_neighbor).fillna(0.0)
 
         c1_nige = df.loc[df['pred_course']==1, 'nige_rate']
         val = c1_nige.values[0] if len(c1_nige) > 0 else 0.5
@@ -816,14 +858,14 @@ class FeatureEngineer:
         df['wind_makuri_cross'] = df['wind_speed'] * df['makuri_rate']
         df['strong_wind_makuri'] = df['is_strong_wind'] * df['makuri_rate']
         df['wind_makurizashi_cross'] = df['wind_speed'] * df['makurizashi_rate']
-        df['strong_wind_outer_adv'] = df['is_strong_wind'] * (df['boat_number'] >= 3).astype(float)
-        df['wind_nige_vulnerability'] = df['wind_speed'] * (1.0 - df['nige_rate']) * (df['boat_number'] == 1).astype(float)
+        df['strong_wind_outer_adv'] = df['is_strong_wind'] * (df['pred_course'] >= 3).astype(float)
+        df['wind_nige_vulnerability'] = df['wind_speed'] * (1.0 - df['nige_rate']) * (df['pred_course'] == 1).astype(float)
 
         df['wave_weight_prod'] = df['wave_height'] * df['weight']
         df['wave_weight_ratio'] = df['wave_height'] / np.maximum(df['weight'], 40.0)
         df['is_high_wave'] = (df['wave_height'] >= 4.0).astype(float)
         df['high_wave_heavy_penalty'] = df['is_high_wave'] * np.maximum(0.0, df['weight'] - 52.0)
-        df['high_wave_inner_risk'] = df['is_high_wave'] * (df['boat_number'] == 1).astype(float)
+        df['high_wave_inner_risk'] = df['is_high_wave'] * (df['pred_course'] == 1).astype(float)
         
         df['nat_win_rate'] = pd.to_numeric(df['nat_win_rate'], errors='coerce').fillna(0.0)
         df['local_win_rate'] = pd.to_numeric(df['local_win_rate'], errors='coerce').fillna(0.0)
@@ -852,7 +894,7 @@ class FeatureEngineer:
         venue_tailwind_from = {
             '桐生': 135, '戸田': 90, '江戸川': 180, '平和島': 180, '多摩川': 270,
             '浜名湖': 180, '蒲郡': 270, '常滑': 270, '津': 135, '三国': 180,
-            'びわこ': 225, '住之江': 270, '尼崎': 90, '鳴門': 135, '丸亀': 15,
+            'びわこ': 225, '住之江': 270, '尼崎': 90, '鳴門': 135, '丸亀': 180,
             '児島': 225, '宮島': 270, '徳山': 135, '下関': 270, '若松': 270,
             '芦屋': 135, '福岡': 0, '唐津': 135, '大村': 315
         }
@@ -863,15 +905,17 @@ class FeatureEngineer:
 
         if 'race_date' not in df.columns: df['race_date'] = '20000101'
         
-        wind_map = {
-            1: '北', 2: '北北東', 3: '北東', 4: '東北東', 5: '東', 6: '東南東', 7: '南東', 8: '南南東',
-            9: '南', 10: '南南西', 11: '南西', 12: '西南西', 13: '西', 14: '西北西', 15: '北西', 16: '北北西'
+        wind_map_8 = {
+            0: '無風', 17: '無風', '0': '無風', '17': '無風',
+            1: '北', 2: '北東', 3: '北東', 4: '東', 5: '東', 6: '南東', 7: '南東', 8: '南',
+            9: '南', 10: '南西', 11: '南西', 12: '西', 13: '西', 14: '北西', 15: '北西', 16: '北',
+            '北北東': '北東', '東北東': '東', '東南東': '南東', '南南東': '南',
+            '南南西': '南西', '西南西': '西', '西北西': '北西', '北北西': '北'
         }
-        if pd.api.types.is_numeric_dtype(df['wind_direction']):
-            df['wind_direction'] = df['wind_direction'].replace(wind_map).astype(str).replace('nan', '')
-        else:
-            df['wind_direction'] = df['wind_direction'].astype(str).replace('nan', '')
+        df['wind_direction'] = df['wind_direction'].replace(wind_map_8).astype(str).replace('nan', '無風')
 
+        df = df.loc[:, ~df.columns.duplicated()]
+        df = df.sort_values('boat_number').reset_index(drop=True)
 
         for col in df.columns:
             if col not in ['race_id', 'race_date', 'venue_name', 'prior_results', 'wind_direction', 'branch', 'class', 'racer_class', 'venue_code_y']:
@@ -1043,6 +1087,7 @@ app_mode = st.sidebar.radio(
     [
         "📊 自動運用ダッシュボード (Auto Dashboard)",
         "🛡️ 的中特化パネル (Hit-Focused)",
+        "💣 万舟スナイパーパネル (Man-shu Sniper)",
         "🎯 マニュアル推論 (Manual Mode)"
     ],
     index=0
@@ -1705,6 +1750,77 @@ elif app_mode == "🛡️ 的中特化パネル (Hit-Focused)":
 
 
 # =====================================================================
+# 4.5 Mode B2: 💣 万舟スナイパーパネル (Man-shu Sniper)
+# =====================================================================
+
+elif app_mode == "💣 万舟スナイパーパネル (Man-shu Sniper)":
+    st.title("💣 万舟スナイパー 全レースパネル (100〜500倍帯 少額一撃特化)")
+    st.caption(
+        "イン過信危険水域 (b1_drop >= 5%〜6%) × 外枠穴オーバーレイ (outer_ov >= 4%〜5%) 検知時に、"
+        "100〜500倍帯でEV≥1.20の買い目を100円フラット×最大8点 (最大800円) で狙い撃つ高回収モデル "
+        "(2026年OOT検証: 🔥Tier 1 万舟的中率10.5% / 回収率443.5%、💣Tier 2 万舟的中率5.9% / 回収率243.2%)"
+    )
+
+    col_m1, col_m2, col_m3 = st.columns([2, 1.2, 1.2])
+    with col_m1:
+        today_date_m = datetime.date.today()
+        selected_manshu_date = st.date_input("📅 開催日 (Date)", today_date_m, key="manshu_panel_date")
+    with col_m2:
+        if st.button("🔄 最新更新", use_container_width=True, key="btn_manshu_refresh"):
+            st.rerun()
+    with col_m3:
+        if st.button("🏁 結果精算", help="公式レース結果を取得して万舟スナイパーの収支を確定します", use_container_width=True, key="btn_manshu_settle"):
+            import auto_trader
+            date_str_q = selected_manshu_date.strftime('%Y%m%d')
+            with st.spinner("レース結果を取得して収支を確定中..."):
+                settled = auto_trader.settle_race_results(target_date=date_str_q)
+                if settled:
+                    st.success(f"🎉 {len(settled)} 件のレース結果を確定・更新しました！")
+                else:
+                    st.info("確定可能な新規レース結果はありませんでした。")
+            st.rerun()
+
+    date_str_manshu = selected_manshu_date.strftime('%Y%m%d')
+    manshu_races = db_manager.get_manshu_races(date_str_manshu) if hasattr(db_manager, 'get_manshu_races') else []
+
+    if not manshu_races:
+        st.info(f"💡 {selected_manshu_date.strftime('%Y年%m月%d日')} の万舟スナイパーデータはまだありません。\n\n`auto_trader.py` が各レース締切5分前に自動判定・保存し、発動時は Discord アラートも送信します。")
+    else:
+        go_manshu = [r for r in manshu_races if str(r.get('status', '')).endswith('go')]
+        res_manshu = [r for r in go_manshu if bool(r.get('is_resolved'))]
+        res_cnt = len(res_manshu)
+        h_cnt = sum(1 for r in res_manshu if r.get('hit_status') == 'hit')
+        tot_inv = sum(r.get('total_bet', 0) or 0 for r in res_manshu)
+        tot_pay = sum(r.get('payout', 0) or 0 for r in res_manshu)
+        tot_prof = tot_pay - tot_inv
+        hit_pct = (h_cnt / res_cnt * 100.0) if res_cnt > 0 else 0.0
+        roi_pct = (tot_pay / tot_inv * 100.0) if tot_inv > 0 else 0.0
+        prof_c = "#00E676" if tot_prof > 0 else ("#FF5252" if tot_prof < 0 else "#FFFFFF")
+
+        st.markdown(f"""
+        <div style="background: rgba(30,10,20,0.6); border: 1.5px solid #FF4081; border-radius: 10px; padding: 12px 18px; margin-top: 10px; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+            <div>💣 <b>本日発動レース:</b> <span style="color:#FF80AB; font-weight:bold;">{len(go_manshu)}</span> R (確定: {res_cnt} R)</div>
+            <div>🎯 <b>万舟的中数:</b> <span style="color:#00E676; font-weight:bold;">{h_cnt}</span> / {res_cnt} (<span style="color:#00E676; font-weight:bold;">{hit_pct:.1f}%</span>)</div>
+            <div>💰 <b>総投資:</b> {tot_inv:,} 円 | <b>総払戻:</b> {tot_pay:,} 円</div>
+            <div>💎 <b>確定収支:</b> <span style="color:{prof_c}; font-size:1.15em; font-weight:bold;">{tot_prof:+,} 円</span> (回収率: <b>{roi_pct:.1f}%</b>)</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        for r in go_manshu:
+            detail = db_manager.get_manshu_race_detail(r['race_id']) if hasattr(db_manager, 'get_manshu_race_detail') else None
+            bets = detail.get('bets', []) if detail else []
+            tier_str = "🔥 激熱万舟 (Tier 1: 回収443.5%検証)" if r.get('is_gogo_lamp') else "💣 万舟好機 (Tier 2: 回収243.2%検証)"
+            b1_d = float(r.get('b1_drop') or 0.0) * 100.0
+            out_ov = float(r.get('outer_ov') or 0.0) * 100.0
+            with st.expander(f"{tier_str} ｜ {r['venue_name']} {r['race_no']}R (締切 {r.get('deadline_time', '--:--')}) ｜ 1号艇過信: +{b1_d:.1f}% / 外枠穴({r.get('top_boat', 4)}号艇): +{out_ov:.1f}% ｜ {r.get('bets_count', 0)}点 ({r.get('total_bet', 0):,}円)", expanded=True):
+                if r.get('is_resolved'):
+                    st.markdown(f"**確定着順:** `{r.get('actual_result')}` ｜ **払戻:** `{r.get('payout', 0):,}円` ｜ **確定損益:** `{r.get('profit', 0):+,}円`")
+                if bets:
+                    df_mb = pd.DataFrame(bets)
+                    st.dataframe(df_mb[['combination', 'bet_amount', 'odds', 'prob', 'ev', 'expected_return']], use_container_width=True, hide_index=True)
+
+
+# =====================================================================
 # 5. Mode C: 🎯 マニュアル推論 (Manual Mode)
 # =====================================================================
 
@@ -1979,8 +2095,11 @@ else:
         else:
             p_norm_syn_dict = {b: 1.0 / len(active_boats) for b in active_boats}
             
-        df_feat['syn_win_rate'] = df_feat['boat_number'].map(p_norm_syn_dict).fillna(1.0 / len(active_boats))
-        df_feat['init_score'] = probs_to_init_scores(df_feat['syn_win_rate'].to_numpy())
+        # model_honmei は学習データと同様に未正規化の逆数和 (Σ(1/odds)) を syn_win_rate として参照
+        df_feat['syn_win_rate'] = df_feat['boat_number'].map(syn_dict).fillna(0.0)
+        # model_residual のベースライン init_score には正規化後の市場勝率を使用
+        p_norm_syn_series = df_feat['boat_number'].map(p_norm_syn_dict).fillna(1.0 / len(active_boats))
+        df_feat['init_score'] = probs_to_init_scores(p_norm_syn_series.to_numpy())
 
         # Gatekeeper 推論
         model_h = lgb.Booster(model_file=MODEL_HONMEI_PATH)
@@ -2022,27 +2141,54 @@ else:
         else:
             st.info(f"⚡ **【Gatekeeper 制限解除】** 信頼度スコア {max_p1:.2%}。{play_mode} に従い推論を実行します。")
             
-        # 1.5 Sniper Filter (決定木マイクロクラスタ: Node 8, 9, 10)
+        # Extractor 推論 (Residual 1着 & 条件付き2・3着モデル)
+        model_r = lgb.Booster(model_file=MODEL_RESIDUAL_PATH)
+        df_r = prepare_features_for_model(df_feat, model_r)
+        raw_res = model_r.predict(df_r, raw_score=True)
+        total_logits = raw_res + df_feat['init_score'].to_numpy()
+        p_raw_res = 1.0 / (1.0 + np.exp(-np.clip(total_logits, -30, 30)))
+        p_norm_res = p_raw_res / np.sum(p_raw_res)
+        p1_dict_residual = dict(zip(df_feat['boat_number'], p_norm_res))
+
         b1_feat = df_feat[df_feat['boat_number'] == 1]
         b1_motor_rate = float(b1_feat['motor_rate'].iloc[0]) if (len(b1_feat) > 0 and 'motor_rate' in b1_feat.columns and pd.notna(b1_feat['motor_rate'].iloc[0])) else 0.0
         wave_height = float(df_feat['wave_height'].iloc[0]) if ('wave_height' in df_feat.columns and pd.notna(df_feat['wave_height'].iloc[0])) else 0.0
+        b1_p_res = float(p1_dict_residual.get(1, 0.0))
+        b1_p_mkt = float(p_norm_syn_dict.get(1, 0.0))
+        is_cluster1_venue = (venue_code in CLUSTER_1_VENUES)
+
+        # 1.5 新戦略 Triple-Regime Gatekeeper & Sniper Filter (2026年OOT全4四半期黒字・ROI 159.79%)
+        is_regime_a = (not is_cluster1_venue) and (top_boat == 1 and max_p1 >= 0.80 and b1_p_res > b1_p_mkt)
+        is_regime_b = (not is_cluster1_venue) and (top_boat == 1 and b1_p_res >= 0.74 and b1_motor_rate >= 35.0)
+        regime_c_heads = tuple(
+            b for b in (2, 3, 4)
+            if float(p1_dict_residual.get(b, 0.0)) >= 0.35
+            and (float(p1_dict_residual.get(b, 0.0)) - float(p_norm_syn_dict.get(b, 0.0))) >= 0.11
+        )
+        is_regime_c = (len(regime_c_heads) > 0) and not (is_regime_a or is_regime_b)
 
         sniper_go = False
         sniper_node = ""
-
-        if b1_motor_rate > 61.33:
+        hybrid_alpha = 0.0
+        if is_regime_a:
             sniper_go = True
-            sniper_node = "Node 10: 超抜モーター"
-        elif wave_height > 6.5:  # (b1_motor_rate <= 61.33)
+            sniper_node = "Regime A: 1号艇・市場過小評価オーバーレイ (Hybrid 2nd/3rd)"
+            hybrid_alpha = 0.6
+        elif is_regime_b:
             sniper_go = True
-            sniper_node = "Node 9: 荒水面オッズ歪み"
-        elif b1_motor_rate > 30.09 and max_p1 > 0.81:  # (wave_height <= 6.5)
+            sniper_node = "Regime B: 1号艇・高信頼残差×好モーター (Benter)"
+            hybrid_alpha = 0.0
+        elif is_regime_c:
             sniper_go = True
-            sniper_node = "Node 8: 主力鉄板"
+            heads_str = ",".join(f"{b}号艇" for b in regime_c_heads)
+            sniper_node = f"Regime C: 逆転スナイプ [{heads_str}→1号艇2着残し] (Overlay>=11%)"
+            hybrid_alpha = 0.0
+            if use_cluster_auto:
+                d2_effective, d3_effective = 0.70, 0.80
 
         if gatekeeper_th > 0.0:
             if not sniper_go:
-                st.warning(f"🎯 **【Sniper Filter 見送り】** 条件未達のため投資スキップ (P1={max_p1:.2%}, Motor={b1_motor_rate:.1f}%, Wave={wave_height:.1f}cm)")
+                st.warning(f"🎯 **【Sniper Filter 見送り】** 条件未達のため投資スキップ (P1={max_p1:.2%}, ResP1={b1_p_res:.1%}, MktP1={b1_p_mkt:.1%}, Motor={b1_motor_rate:.1f}%)")
                 try:
                     db_manager.save_race_prediction(
                         race_id=race_id, race_date=date_str, venue_code=venue_code,
@@ -2054,18 +2200,9 @@ else:
                 except Exception: pass
                 st.stop()
             else:
-                st.success(f"🎯 **【Sniper Filter 通過】** [{sniper_node}] (P1={max_p1:.2%}, Motor={b1_motor_rate:.1f}%, Wave={wave_height:.1f}cm)")
-        
-        # Extractor 推論
-        model_r = lgb.Booster(model_file=MODEL_RESIDUAL_PATH)
-        df_r = prepare_features_for_model(df_feat, model_r)
-        raw_res = model_r.predict(df_r, raw_score=True)
-        total_logits = raw_res + df_feat['init_score'].to_numpy()
-        p_raw_res = 1.0 / (1.0 + np.exp(-np.clip(total_logits, -30, 30)))
-        p_norm_res = p_raw_res / np.sum(p_raw_res)
-        p1_dict_residual = dict(zip(df_feat['boat_number'], p_norm_res))
+                st.success(f"🎯 **【Sniper Filter 通過】** [{sniper_node}] (P1={max_p1:.2%}, ResP1={b1_p_res:.1%}, MktP1={b1_p_mkt:.1%}, Motor={b1_motor_rate:.1f}%)")
 
-        # Benter 展開
+        # Benter 展開 & 条件付き2・3着ハイブリッド統合
         benter_probs, _, _ = calculate_benter_probs(
             p1_dict_residual,
             d2=d2_effective,
@@ -2073,6 +2210,29 @@ else:
             calibration_method='direct'
         )
         benter_probs_dict = {p['combo']: p['prob'] for p in benter_probs}
+
+        if hybrid_alpha > 0.0 and os.path.exists(MODEL_2ND_PATH) and os.path.exists(MODEL_3RD_PATH):
+            try:
+                model_2nd = lgb.Booster(model_file=MODEL_2ND_PATH)
+                model_3rd = lgb.Booster(model_file=MODEL_3RD_PATH)
+                sub_sum = float(df_feat.loc[df_feat['boat_number'] >= 2, 'syn_win_rate'].sum())
+                p_sub = np.where(sub_sum > 0, df_feat['syn_win_rate'].to_numpy() / max(sub_sum, 1e-9), 0.20)
+                init_sub = probs_to_init_scores(p_sub, clip_eps=1e-4)
+                init_23 = probs_to_init_scores(np.clip(p_sub * 2.0, 1e-4, 1.0 - 1e-4), clip_eps=1e-4)
+                df_2 = prepare_features_for_model(df_feat, model_2nd)
+                p_c2 = 1.0 / (1.0 + np.exp(-np.clip(model_2nd.predict(df_2, raw_score=True) + init_sub, -30, 30)))
+                p_c3 = 1.0 / (1.0 + np.exp(-np.clip(model_3rd.predict(df_2, raw_score=True) + init_23, -30, 30)))
+                boats_arr = df_feat['boat_number'].to_numpy(dtype=int)
+                cond2_d = {int(boats_arr[i]): max(float(p_c2[i]), 1e-9) for i in range(len(boats_arr))}
+                cond3_d = {int(boats_arr[i]): max(float(p_c3[i]), 1e-9) for i in range(len(boats_arr))}
+                for b1, b2, b3 in itertools.permutations(boats_arr, 3):
+                    c_key = f"{int(b1)}-{int(b2)}-{int(b3)}"
+                    prob2_c = cond2_d[int(b2)] / sum(cond2_d[int(b)] for b in boats_arr if b != b1)
+                    prob3_c = cond3_d[int(b3)] / sum(cond3_d[int(b)] for b in boats_arr if b != b1 and b != b2)
+                    p_cond = float(p1_dict_residual.get(int(b1), 0.0)) * prob2_c * prob3_c
+                    benter_probs_dict[c_key] = (1.0 - hybrid_alpha) * benter_probs_dict.get(c_key, 0.0) + hybrid_alpha * p_cond
+            except Exception:
+                pass
 
         # 買い目選出 & 資金配分
         if mode_key == "hit_focused":
@@ -2089,9 +2249,23 @@ else:
             # ガチ投資 & エンタメモード: ポートフォリオ最適化 (SLSQP / Markowitz)
             optimizer = PortfolioOptimizer()
             kelly_param = 0.25 if "ケリー" in strategy_choice else None
+            if mode_key == "honmei_quant":
+                if is_regime_c:
+                    allowed_h_strs = {str(b) for b in regime_c_heads}
+                    target_probs_dict = {
+                        c: (p if len(c.split('-')) == 3 and c.split('-')[0] in allowed_h_strs and c.split('-')[1] == '1' else 0.0)
+                        for c, p in benter_probs_dict.items()
+                    }
+                else:
+                    target_probs_dict = {
+                        c: (p if len(c.split('-')) == 3 and c.split('-')[0] == '1' and c.split('-')[1] in ('2', '3', '4') else 0.0)
+                        for c, p in benter_probs_dict.items()
+                    }
+            else:
+                target_probs_dict = benter_probs_dict
             
             bets = optimizer.optimize_funds(
-                probabilities=benter_probs_dict,
+                probabilities=target_probs_dict,
                 odds=all_odds,
                 bankroll=float(bankroll),
                 risk_aversion=float(risk_aversion),

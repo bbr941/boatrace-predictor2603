@@ -374,6 +374,72 @@ def init_database() -> bool:
             ]:
                 try: cur.execute(col_ddl)
                 except Exception: pass
+
+            # 8. 万舟スナイパー専用テーブル (manshu_predictions / manshu_bets)
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS manshu_predictions (
+                id SERIAL PRIMARY KEY,
+                race_id VARCHAR(50) UNIQUE NOT NULL,
+                race_date VARCHAR(10) NOT NULL,
+                venue_code INT NOT NULL,
+                venue_name VARCHAR(20) NOT NULL,
+                race_no INT NOT NULL,
+                deadline_time VARCHAR(20),
+                top_boat INT,
+                max_p1 FLOAT,
+                prob_gap FLOAT,
+                cluster_id INT,
+                cluster_name VARCHAR(50),
+                status VARCHAR(50) NOT NULL,
+                total_bet INT DEFAULT 0,
+                bets_count INT DEFAULT 0,
+                min_return INT DEFAULT 0,
+                max_return INT DEFAULT 0,
+                min_profit INT DEFAULT 0,
+                target_cum_prob FLOAT DEFAULT 0.0,
+                actual_result VARCHAR(10),
+                payout INT DEFAULT 0,
+                profit INT DEFAULT 0,
+                is_resolved BOOLEAN DEFAULT FALSE,
+                hit_status VARCHAR(20),
+                is_gogo_lamp BOOLEAN DEFAULT FALSE,
+                is_chance_lamp BOOLEAN DEFAULT FALSE,
+                expected_roi FLOAT DEFAULT 0.0,
+                motor_rate FLOAT DEFAULT 0.0,
+                synthetic_odds FLOAT DEFAULT 0.0,
+                b1_drop FLOAT DEFAULT 0.0,
+                outer_ov FLOAT DEFAULT 0.0,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS manshu_bets (
+                id SERIAL PRIMARY KEY,
+                race_id VARCHAR(50) NOT NULL,
+                combination VARCHAR(10) NOT NULL,
+                bet_amount INT NOT NULL,
+                prob FLOAT NOT NULL,
+                odds FLOAT NOT NULL,
+                ev FLOAT NOT NULL,
+                expected_return INT DEFAULT 0,
+                profit INT DEFAULT 0,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT uq_manshu_bet UNIQUE(race_id, combination)
+            );
+            """)
+
+            # Cloudflare Pages フロントエンド (Supabase anon) 向け RLS 読み取り許可ポリシー
+            for rls_ddl in [
+                "ALTER TABLE manshu_predictions ENABLE ROW LEVEL SECURITY;",
+                "DROP POLICY IF EXISTS p_select_all ON manshu_predictions;",
+                "CREATE POLICY p_select_all ON manshu_predictions FOR SELECT USING (true);",
+                "ALTER TABLE manshu_bets ENABLE ROW LEVEL SECURITY;",
+                "DROP POLICY IF EXISTS p_select_all ON manshu_bets;",
+                "CREATE POLICY p_select_all ON manshu_bets FOR SELECT USING (true);"
+            ]:
+                try: cur.execute(rls_ddl)
+                except Exception: pass
             
             # インデックスの作成
             cur.execute("CREATE INDEX IF NOT EXISTS idx_race_pred_date ON race_predictions(race_date);")
@@ -389,6 +455,9 @@ def init_database() -> bool:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_hit_pred_date ON hit_focused_predictions(race_date);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_hit_pred_venue ON hit_focused_predictions(venue_code, race_date);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_hit_bets_race ON hit_focused_bets(race_id);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_manshu_pred_date ON manshu_predictions(race_date);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_manshu_pred_venue ON manshu_predictions(venue_code, race_date);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_manshu_bets_race ON manshu_bets(race_id);")
             
             logger.info("✅ [Supabase / PostgreSQL] 全テーブルおよびインデックスのマイグレーションが完了しました！")
             
@@ -595,6 +664,60 @@ def init_database() -> bool:
             ]:
                 try: cur.execute(col_ddl)
                 except Exception: pass
+
+            # SQLite 万舟スナイパー専用テーブル
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS manshu_predictions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                race_id TEXT UNIQUE NOT NULL,
+                race_date TEXT NOT NULL,
+                venue_code INTEGER NOT NULL,
+                venue_name TEXT NOT NULL,
+                race_no INTEGER NOT NULL,
+                deadline_time TEXT,
+                top_boat INTEGER,
+                max_p1 REAL,
+                prob_gap REAL,
+                cluster_id INTEGER,
+                cluster_name TEXT,
+                status TEXT NOT NULL,
+                total_bet INTEGER DEFAULT 0,
+                bets_count INTEGER DEFAULT 0,
+                min_return INTEGER DEFAULT 0,
+                max_return INTEGER DEFAULT 0,
+                min_profit INTEGER DEFAULT 0,
+                target_cum_prob REAL DEFAULT 0.0,
+                actual_result TEXT,
+                payout INTEGER DEFAULT 0,
+                profit INTEGER DEFAULT 0,
+                is_resolved INTEGER DEFAULT 0,
+                hit_status TEXT,
+                is_gogo_lamp INTEGER DEFAULT 0,
+                is_chance_lamp INTEGER DEFAULT 0,
+                expected_roi REAL DEFAULT 0.0,
+                motor_rate REAL DEFAULT 0.0,
+                synthetic_odds REAL DEFAULT 0.0,
+                b1_drop REAL DEFAULT 0.0,
+                outer_ov REAL DEFAULT 0.0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS manshu_bets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                race_id TEXT NOT NULL,
+                combination TEXT NOT NULL,
+                bet_amount INTEGER NOT NULL,
+                prob REAL NOT NULL,
+                odds REAL NOT NULL,
+                ev REAL NOT NULL,
+                expected_return INTEGER DEFAULT 0,
+                profit INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(race_id, combination)
+            );
+            """)
             
             cur.execute("CREATE INDEX IF NOT EXISTS idx_race_pred_date ON race_predictions(race_date);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_race_pred_source ON race_predictions(source);")
@@ -606,6 +729,9 @@ def init_database() -> bool:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_hit_pred_date ON hit_focused_predictions(race_date);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_hit_pred_venue ON hit_focused_predictions(venue_code, race_date);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_hit_bets_race ON hit_focused_bets(race_id);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_manshu_pred_date ON manshu_predictions(race_date);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_manshu_pred_venue ON manshu_predictions(venue_code, race_date);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_manshu_bets_race ON manshu_bets(race_id);")
             
             logger.info("✅ [SQLite] 全テーブルのマイグレーションが完了しました！")
 
@@ -970,12 +1096,240 @@ def get_hit_focused_race_detail(race_id: str) -> Optional[Dict[str, Any]]:
         return race_dict
 
 
+def save_manshu_prediction(
+    race_id: str,
+    race_date: str,
+    venue_code: int,
+    venue_name: str,
+    race_no: int,
+    deadline_time: str,
+    top_boat: Optional[int],
+    max_p1: Optional[float],
+    prob_gap: Optional[float],
+    cluster_id: Optional[int],
+    cluster_name: Optional[str],
+    status: str,
+    bets: Dict[str, int],
+    benter_probs: Dict[str, float],
+    all_odds: Dict[str, float],
+    target_cum_prob: float = 0.0,
+    is_gogo_lamp: bool = False,
+    is_chance_lamp: bool = False,
+    expected_roi: float = 0.0,
+    motor_rate: float = 0.0,
+    synthetic_odds: float = 0.0,
+    b1_drop: float = 0.0,
+    outer_ov: float = 0.0
+) -> bool:
+    """
+    万舟スナイパー (💣 万舟スナイパー) の推論結果および買い目を保存 (UPSERT)
+    is_gogo_lamp: Tier 1 (🔥 激熱万舟: b1_drop>=6% & outer_ov>=5%)
+    is_chance_lamp: Tier 2 (💣 万舟好機: b1_drop>=5% & outer_ov>=4%)
+    """
+    total_bet = sum(bets.values()) if bets else 0
+    returns = [int((amt / 100.0) * all_odds.get(c, 0.0) * 100.0) for c, amt in bets.items()] if bets else []
+    min_ret = min(returns) if returns else 0
+    max_ret = max(returns) if returns else 0
+    min_prof = (min_ret - total_bet) if returns else 0
+
+    with get_db_connection() as db:
+        cur = db.cursor()
+        ph = "%s" if db.is_postgres else "?"
+
+        if db.is_postgres:
+            query = f"""
+            INSERT INTO manshu_predictions (
+                race_id, race_date, venue_code, venue_name, race_no,
+                deadline_time, top_boat, max_p1, prob_gap, cluster_id,
+                cluster_name, status, total_bet, bets_count, min_return,
+                max_return, min_profit, target_cum_prob, is_gogo_lamp,
+                is_chance_lamp, expected_roi, motor_rate, synthetic_odds,
+                b1_drop, outer_ov
+            ) VALUES ({', '.join([ph]*25)})
+            ON CONFLICT (race_id) DO UPDATE SET
+                deadline_time = EXCLUDED.deadline_time,
+                top_boat = EXCLUDED.top_boat,
+                max_p1 = EXCLUDED.max_p1,
+                prob_gap = EXCLUDED.prob_gap,
+                cluster_id = EXCLUDED.cluster_id,
+                cluster_name = EXCLUDED.cluster_name,
+                status = EXCLUDED.status,
+                total_bet = EXCLUDED.total_bet,
+                bets_count = EXCLUDED.bets_count,
+                min_return = EXCLUDED.min_return,
+                max_return = EXCLUDED.max_return,
+                min_profit = EXCLUDED.min_profit,
+                target_cum_prob = EXCLUDED.target_cum_prob,
+                is_gogo_lamp = EXCLUDED.is_gogo_lamp,
+                is_chance_lamp = EXCLUDED.is_chance_lamp,
+                expected_roi = EXCLUDED.expected_roi,
+                motor_rate = EXCLUDED.motor_rate,
+                synthetic_odds = EXCLUDED.synthetic_odds,
+                b1_drop = EXCLUDED.b1_drop,
+                outer_ov = EXCLUDED.outer_ov,
+                created_at = CURRENT_TIMESTAMP;
+            """
+        else:
+            query = f"""
+            INSERT INTO manshu_predictions (
+                race_id, race_date, venue_code, venue_name, race_no,
+                deadline_time, top_boat, max_p1, prob_gap, cluster_id,
+                cluster_name, status, total_bet, bets_count, min_return,
+                max_return, min_profit, target_cum_prob, is_gogo_lamp,
+                is_chance_lamp, expected_roi, motor_rate, synthetic_odds,
+                b1_drop, outer_ov
+            ) VALUES ({', '.join([ph]*25)})
+            ON CONFLICT(race_id) DO UPDATE SET
+                deadline_time = excluded.deadline_time,
+                top_boat = excluded.top_boat,
+                max_p1 = excluded.max_p1,
+                prob_gap = excluded.prob_gap,
+                cluster_id = excluded.cluster_id,
+                cluster_name = excluded.cluster_name,
+                status = excluded.status,
+                total_bet = excluded.total_bet,
+                bets_count = excluded.bets_count,
+                min_return = excluded.min_return,
+                max_return = excluded.max_return,
+                min_profit = excluded.min_profit,
+                target_cum_prob = excluded.target_cum_prob,
+                is_gogo_lamp = excluded.is_gogo_lamp,
+                is_chance_lamp = excluded.is_chance_lamp,
+                expected_roi = excluded.expected_roi,
+                motor_rate = excluded.motor_rate,
+                synthetic_odds = excluded.synthetic_odds,
+                b1_drop = excluded.b1_drop,
+                outer_ov = excluded.outer_ov,
+                created_at = CURRENT_TIMESTAMP;
+            """
+        params = (
+            race_id, race_date, venue_code, venue_name, race_no,
+            deadline_time, top_boat, max_p1, prob_gap, cluster_id,
+            cluster_name, status, total_bet, len(bets) if bets else 0,
+            min_ret, max_ret, min_prof, target_cum_prob,
+            is_gogo_lamp, is_chance_lamp, expected_roi, motor_rate, synthetic_odds,
+            b1_drop, outer_ov
+        )
+        cur.execute(query, params)
+
+        if bets:
+            for combo, amt in bets.items():
+                p = float(benter_probs.get(combo, 0.0))
+                o = float(all_odds.get(combo, 0.0))
+                ev = float(p * o)
+                exp_ret = int((amt / 100.0) * o * 100.0)
+                profit = exp_ret - total_bet
+
+                if db.is_postgres:
+                    b_query = f"""
+                    INSERT INTO manshu_bets (
+                        race_id, combination, bet_amount, prob, odds, ev, expected_return, profit
+                    ) VALUES ({', '.join([ph]*8)})
+                    ON CONFLICT (race_id, combination) DO UPDATE SET
+                        bet_amount = EXCLUDED.bet_amount,
+                        prob = EXCLUDED.prob,
+                        odds = EXCLUDED.odds,
+                        ev = EXCLUDED.ev,
+                        expected_return = EXCLUDED.expected_return,
+                        profit = EXCLUDED.profit,
+                        created_at = CURRENT_TIMESTAMP;
+                    """
+                else:
+                    b_query = f"""
+                    INSERT INTO manshu_bets (
+                        race_id, combination, bet_amount, prob, odds, ev, expected_return, profit
+                    ) VALUES ({', '.join([ph]*8)})
+                    ON CONFLICT(race_id, combination) DO UPDATE SET
+                        bet_amount = excluded.bet_amount,
+                        prob = excluded.prob,
+                        odds = excluded.odds,
+                        ev = excluded.ev,
+                        expected_return = excluded.expected_return,
+                        profit = excluded.profit,
+                        created_at = CURRENT_TIMESTAMP;
+                    """
+                cur.execute(b_query, (race_id, combo, int(amt), p, o, ev, exp_ret, profit))
+
+        logger.debug(f"Saved manshu prediction for {race_id} ({len(bets)} bets, status={status})")
+        return True
+
+
+def get_manshu_races(race_date: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    万舟スナイパーテーブルから指定日のレース一覧を取得 (会場コード・レース番号順)
+    """
+    with get_db_connection() as db:
+        cur = db.cursor()
+        ph = "%s" if db.is_postgres else "?"
+
+        conditions = []
+        params = []
+        if race_date:
+            clean_date = f"{race_date[:4]}-{race_date[4:6]}-{race_date[6:]}" if (len(race_date) == 8 and race_date.isdigit()) else race_date
+            conditions.append(f"(race_date = {ph} OR race_date = {ph})")
+            params.extend([race_date, clean_date])
+
+        where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        query = f"""
+        SELECT race_id, race_date, venue_code, venue_name, race_no, deadline_time,
+               top_boat, max_p1, prob_gap, cluster_id, cluster_name, status,
+               total_bet, bets_count, min_return, max_return, min_profit, target_cum_prob,
+               is_gogo_lamp, is_chance_lamp, expected_roi, motor_rate, synthetic_odds,
+               b1_drop, outer_ov,
+               actual_result, payout, profit, is_resolved, hit_status, created_at
+        FROM manshu_predictions
+        {where_sql}
+        ORDER BY venue_code ASC, race_no ASC;
+        """
+        cur.execute(query, params)
+        cols = [desc[0] for desc in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def get_manshu_race_detail(race_id: str) -> Optional[Dict[str, Any]]:
+    """
+    指定レースIDの万舟スナイパー詳細情報および買い目一覧を取得
+    """
+    with get_db_connection() as db:
+        cur = db.cursor()
+        ph = "%s" if db.is_postgres else "?"
+
+        cur.execute(f"""
+        SELECT race_id, race_date, venue_code, venue_name, race_no, deadline_time,
+               top_boat, max_p1, prob_gap, cluster_id, cluster_name, status,
+               total_bet, bets_count, min_return, max_return, min_profit, target_cum_prob,
+               is_gogo_lamp, is_chance_lamp, expected_roi, motor_rate, synthetic_odds,
+               b1_drop, outer_ov,
+               actual_result, payout, profit, is_resolved, hit_status, created_at
+        FROM manshu_predictions
+        WHERE race_id = {ph};
+        """, (race_id,))
+        row = cur.fetchone()
+        if not row:
+            return None
+
+        cols = [desc[0] for desc in cur.description]
+        race_dict = dict(zip(cols, row))
+
+        cur.execute(f"""
+        SELECT combination, bet_amount, prob, odds, ev, expected_return, profit
+        FROM manshu_bets
+        WHERE race_id = {ph}
+        ORDER BY prob DESC, ev DESC;
+        """, (race_id,))
+        b_cols = [desc[0] for desc in cur.description]
+        race_dict['bets'] = [dict(zip(b_cols, b_row)) for b_row in cur.fetchall()]
+        return race_dict
+
+
 def clean_mock_data() -> Dict[str, int]:
     """
     データベース内のモック/テスト用データを全テーブルから削除
     """
     deleted_counts = {}
     tables_with_race_id = [
+        'manshu_bets',
+        'manshu_predictions',
         'hit_focused_bets',
         'hit_focused_predictions',
         'manual_recommended_bets',
@@ -994,7 +1348,7 @@ def clean_mock_data() -> Dict[str, int]:
             except Exception as e:
                 logger.warning(f"Error cleaning mock data from {table}: {e}")
                 
-        for table in ['race_predictions', 'manual_race_predictions', 'hit_focused_predictions']:
+        for table in ['race_predictions', 'manual_race_predictions', 'hit_focused_predictions', 'manshu_predictions']:
             try:
                 cur.execute(f"DELETE FROM {table} WHERE status LIKE 'mock%';")
             except Exception: pass
@@ -1189,6 +1543,70 @@ def get_unresolved_hit_focused_predictions(
         query = f"""
         SELECT race_id, race_date, venue_code, venue_name, race_no, deadline_time, status, total_bet
         FROM hit_focused_predictions
+        {where_sql}
+        ORDER BY race_date ASC, venue_code ASC, race_no ASC;
+        """
+        cur.execute(query, params)
+        cols = [desc[0] for desc in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def update_manshu_result(
+    race_id: str,
+    actual_result: str,
+    payout: int,
+    profit: int,
+    hit_status: str
+) -> bool:
+    """
+    万舟スナイパーテーブルのレース確定結果と払戻金・確定損益を更新 (is_resolved = TRUE)
+    """
+    with get_db_connection() as db:
+        cur = db.cursor()
+        ph = "%s" if db.is_postgres else "?"
+        resolved_val = "TRUE" if db.is_postgres else "1"
+
+        query = f"""
+        UPDATE manshu_predictions
+        SET actual_result = {ph},
+            payout = {ph},
+            profit = {ph},
+            hit_status = {ph},
+            is_resolved = {resolved_val}
+        WHERE race_id = {ph};
+        """
+        cur.execute(query, (actual_result, int(payout), int(profit), hit_status, race_id))
+        logger.info(f"🏁 [{race_id}] 万舟スナイパー結果確定更新: {actual_result} | Status: {hit_status} | Payout: {payout:,}円 | Profit: {profit:+,}円")
+        return True
+
+
+def get_unresolved_manshu_predictions(
+    date_str: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """
+    万舟スナイパーテーブルから結果未確定の推論レコードを取得
+    """
+    with get_db_connection() as db:
+        cur = db.cursor()
+        ph = "%s" if db.is_postgres else "?"
+
+        conditions = []
+        params = []
+
+        if db.is_postgres:
+            conditions.append("(is_resolved IS NULL OR is_resolved = FALSE)")
+        else:
+            conditions.append("(is_resolved IS NULL OR is_resolved = 0)")
+
+        if date_str:
+            clean_date = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}" if (len(date_str) == 8 and date_str.isdigit()) else date_str
+            conditions.append(f"(race_date = {ph} OR race_date = {ph})")
+            params.extend([date_str, clean_date])
+
+        where_sql = f"WHERE {' AND '.join(conditions)}"
+        query = f"""
+        SELECT race_id, race_date, venue_code, venue_name, race_no, deadline_time, status, total_bet
+        FROM manshu_predictions
         {where_sql}
         ORDER BY race_date ASC, venue_code ASC, race_no ASC;
         """

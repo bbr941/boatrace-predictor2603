@@ -232,6 +232,31 @@ def train_residual_model(
     model.save_model(model_output_path)
     print(f"  💾 モデル保存完了: {model_output_path} (サイズ: {os.path.getsize(model_output_path)/1024:.1f} KB)", flush=True)
 
+    # 追加: 1号艇1着時の条件付き2着・3着モデル (model_2nd.txt / model_3rd.txt) の学習・保存
+    print("  - 1号艇逃げ時の条件付き2着・3着残差モデル (model_2nd.txt / model_3rd.txt) を学習中...", flush=True)
+    b1_won_races = set(train_df[(train_df['boat_number'] == 1) & (train_df['rank'] == 1)]['race_id'])
+    sub_train = train_df[train_df['race_id'].isin(b1_won_races) & (train_df['boat_number'] >= 2)].copy()
+    sub_sums = sub_train.groupby('race_id')['syn_win_rate'].transform('sum')
+    p_sub_norm = np.where(sub_sums > 0, sub_train['syn_win_rate'] / np.maximum(sub_sums, 1e-9), 0.20)
+    sub_train['init_score_sub'] = probs_to_init_scores(p_sub_norm, clip_eps=1e-4)
+    sub_train['y_is_2nd'] = (sub_train['rank'] == 2).astype(int)
+    sub_train['y_is_2or3'] = (sub_train['rank'].isin([2, 3])).astype(int)
+    sub_dates = sorted(sub_train['race_date'].unique())
+    sub_split = sub_dates[int(len(sub_dates) * 0.85)]
+    tr_m = sub_train['race_date'] < sub_split
+    va_m = sub_train['race_date'] >= sub_split
+    params_sub = {**params, 'max_depth': 5, 'num_leaves': 23}
+    dtr_2 = lgb.Dataset(sub_train.loc[tr_m, features], label=sub_train.loc[tr_m, 'y_is_2nd'], init_score=sub_train.loc[tr_m, 'init_score_sub'])
+    dva_2 = lgb.Dataset(sub_train.loc[va_m, features], label=sub_train.loc[va_m, 'y_is_2nd'], init_score=sub_train.loc[va_m, 'init_score_sub'], reference=dtr_2)
+    m_2nd = lgb.train(params_sub, dtr_2, valid_sets=[dva_2], num_boost_round=600, callbacks=[lgb.early_stopping(40, verbose=False)])
+    m_2nd.save_model('model_2nd.txt')
+    init_23 = probs_to_init_scores(np.clip(p_sub_norm * 2.0, 1e-4, 1.0 - 1e-4), clip_eps=1e-4)
+    dtr_3 = lgb.Dataset(sub_train.loc[tr_m, features], label=sub_train.loc[tr_m, 'y_is_2or3'], init_score=init_23[tr_m.to_numpy()])
+    dva_3 = lgb.Dataset(sub_train.loc[va_m, features], label=sub_train.loc[va_m, 'y_is_2or3'], init_score=init_23[va_m.to_numpy()], reference=dtr_3)
+    m_3rd = lgb.train(params_sub, dtr_3, valid_sets=[dva_3], num_boost_round=600, callbacks=[lgb.early_stopping(40, verbose=False)])
+    m_3rd.save_model('model_3rd.txt')
+    print(f"  💾 条件付き2・3着モデル保存完了: model_2nd.txt (iter={m_2nd.best_iteration}), model_3rd.txt (iter={m_3rd.best_iteration})", flush=True)
+
     # ==========================================
     # 評価とパフォーマンス分析 (Out-of-Time)
     # ==========================================

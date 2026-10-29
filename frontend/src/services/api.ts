@@ -113,6 +113,48 @@ export async function getGoldenPredictions(dateStr: string): Promise<RacePredict
 }
 
 /**
+ * 万舟スナイパー (manshu_predictions) の指定日データ取得
+ */
+export async function getManshuPredictions(dateStr: string): Promise<HitFocusedPrediction[]> {
+  if (!isSupabaseConfigured) {
+    return getMockManshuPredictions(dateStr);
+  }
+
+  try {
+    const variants = getDateVariants(dateStr);
+    const { data, error } = await supabase
+      .from('manshu_predictions')
+      .select('*')
+      .in('race_date', variants)
+      .order('venue_code', { ascending: true })
+      .order('race_no', { ascending: true });
+
+    if (error) {
+      console.warn('Supabase manshu fetch error, falling back to mock:', error.message);
+      return getMockManshuPredictions(dateStr);
+    }
+
+    if (!data || data.length === 0) {
+      const { data: latestData } = await supabase
+        .from('manshu_predictions')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(36);
+
+      if (latestData && latestData.length > 0) {
+        return latestData.sort((a, b) => a.venue_code - b.venue_code || a.race_no - b.race_no);
+      }
+      return [];
+    }
+
+    return data as HitFocusedPrediction[];
+  } catch (err) {
+    console.error('Fetch manshu error:', err);
+    return getMockManshuPredictions(dateStr);
+  }
+}
+
+/**
  * 買い目詳細の高速取得 (キャッシュ利用)
  */
 export async function getRaceBets(raceId: string, mode: PredictionMode): Promise<BetItem[]> {
@@ -122,13 +164,18 @@ export async function getRaceBets(raceId: string, mode: PredictionMode): Promise
   }
 
   if (!isSupabaseConfigured) {
-    const mockBets = generateMockBets(raceId);
+    const mockBets = generateMockBets(raceId, mode);
     betsCache[cacheKey] = mockBets;
     return mockBets;
   }
 
   try {
-    const tableName = mode === 'hit_focused' ? 'hit_focused_bets' : 'recommended_bets';
+    const tableName =
+      mode === 'hit_focused'
+        ? 'hit_focused_bets'
+        : mode === 'manshu_sniper'
+        ? 'manshu_bets'
+        : 'recommended_bets';
     const { data, error } = await supabase
       .from(tableName)
       .select('*')
@@ -137,7 +184,11 @@ export async function getRaceBets(raceId: string, mode: PredictionMode): Promise
       .order('prob', { ascending: false });
 
     if (error || !data || data.length === 0) {
-      const mockBets = generateMockBets(raceId);
+      if (mode === 'manshu_sniper') {
+        betsCache[cacheKey] = [];
+        return [];
+      }
+      const mockBets = generateMockBets(raceId, mode);
       betsCache[cacheKey] = mockBets;
       return mockBets;
     }
@@ -156,7 +207,7 @@ export async function getRaceBets(raceId: string, mode: PredictionMode): Promise
     return bets;
   } catch (err) {
     console.error('Fetch bets error:', err);
-    return generateMockBets(raceId);
+    return generateMockBets(raceId, mode);
   }
 }
 
@@ -184,7 +235,7 @@ export async function getBatchRaceBets(raceIds: string[], mode: PredictionMode):
 
   if (!isSupabaseConfigured) {
     for (const id of missingIds) {
-      const mock = generateMockBets(id);
+      const mock = generateMockBets(id, mode);
       betsCache[`${mode}:${id}`] = mock;
       result[id] = mock;
     }
@@ -192,7 +243,12 @@ export async function getBatchRaceBets(raceIds: string[], mode: PredictionMode):
   }
 
   try {
-    const tableName = mode === 'hit_focused' ? 'hit_focused_bets' : 'recommended_bets';
+    const tableName =
+      mode === 'hit_focused'
+        ? 'hit_focused_bets'
+        : mode === 'manshu_sniper'
+        ? 'manshu_bets'
+        : 'recommended_bets';
     const { data, error } = await supabase
       .from(tableName)
       .select('*')
@@ -380,7 +436,77 @@ function getMockGoldenPredictions(dateStr: string): RacePrediction[] {
   return list;
 }
 
-function generateMockBets(raceId: string): BetItem[] {
+function getMockManshuPredictions(dateStr: string): HitFocusedPrediction[] {
+  const venues = [
+    { code: 2, name: '戸田' },
+    { code: 3, name: '江戸川' },
+    { code: 12, name: '住之江' },
+  ];
+
+  const list: HitFocusedPrediction[] = [];
+  const cleanDate = dateStr.replace(/-/g, '');
+
+  venues.forEach((venue) => {
+    for (let r = 1; r <= 12; r++) {
+      const raceId = `${cleanDate}_${venue.code}_${r}`;
+      const isTier1 = r === 4;
+      const isTier2 = r === 9;
+      const isGo = isTier1 || isTier2;
+      const isResolved = r <= 6;
+      const actualResult = isResolved ? (r === 4 ? '4-5-1' : '1-2-3') : null;
+      const payout = r === 4 ? 18420 : 0;
+      const profit = r === 4 ? 17620 : (isResolved && isGo ? -800 : 0);
+      const hitStatus = isResolved && isGo ? (r === 4 ? 'hit' : 'miss') : null;
+
+      list.push({
+        id: venue.code * 100 + r,
+        race_id: raceId,
+        race_date: cleanDate,
+        venue_code: venue.code,
+        venue_name: venue.name,
+        race_no: r,
+        deadline_time: `${14 + Math.floor(r / 2)}:${(r % 2) * 30 + 15}`,
+        top_boat: isGo ? 4 : 1,
+        max_p1: 0.48,
+        prob_gap: 0.12,
+        cluster_id: 1,
+        cluster_name: '難水面',
+        status: isGo ? 'manshu_go' : 'manshu_skipped',
+        total_bet: isGo ? 800 : 0,
+        bets_count: isGo ? 8 : 0,
+        min_return: isGo ? 11200 : 0,
+        max_return: isGo ? 38500 : 0,
+        min_profit: isGo ? 10400 : 0,
+        target_cum_prob: isGo ? 0.068 : 0,
+        actual_result: actualResult,
+        payout: payout,
+        profit: profit,
+        is_resolved: isResolved,
+        hit_status: hitStatus,
+        is_gogo_lamp: isTier1,
+        is_chance_lamp: isTier2,
+        expected_roi: isTier1 ? 1.48 : isTier2 ? 1.32 : 0,
+        motor_rate: 33.5,
+        synthetic_odds: isGo ? 22.5 : 0,
+        b1_drop: isTier1 ? 0.072 : isTier2 ? 0.054 : 0.012,
+        outer_ov: isTier1 ? 0.061 : isTier2 ? 0.045 : 0.008,
+        created_at: new Date().toISOString()
+      });
+    }
+  });
+
+  return list;
+}
+
+function generateMockBets(_raceId: string, mode: PredictionMode = 'hit_focused'): BetItem[] {
+  if (mode === 'manshu_sniper') {
+    return [
+      { combination: '4-1-5', bet_amount: 100, prob: 0.0125, odds: 112.0, ev: 1.40, expected_return: 11200, profit: 10400 },
+      { combination: '4-5-1', bet_amount: 100, prob: 0.0092, odds: 184.2, ev: 1.69, expected_return: 18420, profit: 17620 },
+      { combination: '5-1-4', bet_amount: 100, prob: 0.0085, odds: 162.0, ev: 1.38, expected_return: 16200, profit: 15400 },
+      { combination: '4-2-5', bet_amount: 100, prob: 0.0078, odds: 175.0, ev: 1.37, expected_return: 17500, profit: 16700 },
+    ];
+  }
   return [
     { combination: '1-2-3', bet_amount: 300, prob: 0.182, odds: 7.8, ev: 1.42, expected_return: 2340, profit: 1340 },
     { combination: '1-2-4', bet_amount: 200, prob: 0.125, odds: 11.5, ev: 1.44, expected_return: 2300, profit: 1300 },
